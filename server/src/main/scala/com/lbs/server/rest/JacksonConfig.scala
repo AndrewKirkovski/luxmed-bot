@@ -15,7 +15,7 @@ class JacksonConfig {
     mapper.registerModule(DefaultScalaModule)
     mapper.registerModule(new JavaTimeModule())
     mapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-    mapper.setSerializationInclusion(JsonInclude.Include.NON_NULL)
+    mapper.setSerializationInclusion(JsonInclude.Include.NON_ABSENT)
     mapper
   }
 }

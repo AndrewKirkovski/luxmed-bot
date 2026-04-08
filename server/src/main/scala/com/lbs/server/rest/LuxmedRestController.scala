@@ -50,7 +50,7 @@ class LuxmedRestController extends StrictLogging {
       case Left(ex: InvalidLoginOrPasswordException) =>
         ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.fail("Invalid login or password"))
       case Left(ex) =>
-        ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail(ex.getMessage))
+        ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
     }
   }
 
@@ -174,7 +174,7 @@ class LuxmedRestController extends StrictLogging {
   ): ResponseEntity[_] = {
     apiService.deleteReservation(accountId, reservationId) match {
       case Right(_) => ResponseEntity.ok(ApiResponse.ok("Cancelled"))
-      case Left(ex) => ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail(ex.getMessage))
+      case Left(ex) => ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
     }
   }
 
@@ -242,7 +242,7 @@ class LuxmedRestController extends StrictLogging {
         ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.fail("Invalid login or password"))
       case Left(ex) =>
         logger.error("API call failed", ex)
-        ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail(ex.getMessage))
+        ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ApiResponse.fail(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
     }
   }
 

@@ -7,8 +7,10 @@ import com.lbs.bot.model.{MessageSource, MessageSourceSystem}
 import com.lbs.common.Scheduler
 import com.lbs.server.lang.Localization
 import com.lbs.server.repository.model._
+import com.lbs.bot.model.TelegramMessageSourceSystem
 import com.lbs.server.util.DateTimeUtil._
 import com.lbs.server.util.ServerModelConverters._
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.typesafe.scalalogging.StrictLogging
 import org.springframework.beans.factory.annotation.{Autowired, Value}
 import org.springframework.stereotype.Service
@@ -29,6 +31,8 @@ class MonitoringService extends StrictLogging {
   private var dataService: DataService = _
   @Value("${monitoring.webhook.url:}")
   private var webhookUrl: String = _
+  @Autowired(required = false)
+  private var objectMapper: ObjectMapper = _
   @Autowired
   private var apiService: ApiService = _
   @Autowired
@@ -293,32 +297,39 @@ class MonitoringService extends StrictLogging {
   }
 
   private def sendNotification(source: MessageSource, message: String): Unit = {
-    if (bot != null) {
+    // Use Telegram bot only for Telegram-originated sources
+    if (bot != null && source.sourceSystem == TelegramMessageSourceSystem) {
       bot.sendMessage(source, message)
     } else if (webhookUrl != null && webhookUrl.nonEmpty) {
-      try {
-        val escapedChatId = escapeJson(source.chatId)
-        val escapedMessage = escapeJson(message)
-        val payload = s"""{"chatId":"$escapedChatId","sourceSystemId":${source.sourceSystem.id},"message":"$escapedMessage"}"""
-        scalaj.http.Http(webhookUrl)
-          .header("Content-Type", "application/json")
-          .postData(payload)
-          .timeout(connTimeoutMs = 5000, readTimeoutMs = 10000)
-          .asString
-      } catch {
-        case ex: Exception => logger.error("Failed to send webhook notification", ex)
-      }
+      sendWebhookNotification(source, message)
     } else {
-      logger.warn(s"No notification channel available. Message: $message")
+      logger.warn(s"No notification channel available for source system ${source.sourceSystem.name}. Message: $message")
     }
   }
 
-  private def escapeJson(s: String): String = {
-    s.replace("\\", "\\\\")
-      .replace("\"", "\\\"")
-      .replace("\n", "\\n")
-      .replace("\r", "\\r")
-      .replace("\t", "\\t")
+  private def sendWebhookNotification(source: MessageSource, message: String): Unit = {
+    try {
+      val payload = if (objectMapper != null) {
+        objectMapper.writeValueAsString(Map(
+          "chatId" -> source.chatId,
+          "sourceSystemId" -> source.sourceSystem.id,
+          "message" -> message
+        ))
+      } else {
+        // Fallback if ObjectMapper not available
+        s"""{"chatId":"${source.chatId}","sourceSystemId":${source.sourceSystem.id},"message":"notification"}"""
+      }
+      val response = scalaj.http.Http(webhookUrl)
+        .header("Content-Type", "application/json")
+        .postData(payload)
+        .timeout(connTimeoutMs = 5000, readTimeoutMs = 10000)
+        .asString
+      if (!response.is2xx) {
+        logger.error(s"Webhook notification failed with status ${response.code}: ${response.body}")
+      }
+    } catch {
+      case ex: Exception => logger.error("Failed to send webhook notification", ex)
+    }
   }
 
   implicit class MonitoringAsSource(monitoring: Monitoring) {
