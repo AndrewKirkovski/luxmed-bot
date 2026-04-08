@@ -10,7 +10,7 @@ import com.lbs.server.repository.model._
 import com.lbs.server.util.DateTimeUtil._
 import com.lbs.server.util.ServerModelConverters._
 import com.typesafe.scalalogging.StrictLogging
-import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.{Autowired, Value}
 import org.springframework.stereotype.Service
 
 import java.time.{LocalDateTime, ZonedDateTime}
@@ -23,10 +23,12 @@ import scala.util.Random
 @Service
 class MonitoringService extends StrictLogging {
 
-  @Autowired
+  @Autowired(required = false)
   private var bot: Bot = _
   @Autowired
   private var dataService: DataService = _
+  @Value("${monitoring.webhook.url:}")
+  private var webhookUrl: String = _
   @Autowired
   private var apiService: ApiService = _
   @Autowired
@@ -61,7 +63,7 @@ class MonitoringService extends StrictLogging {
         messages.availableTermEntry(term, monitoring, index)
       }.mkString
 
-    bot.sendMessage(monitoring.source, message)
+    sendNotification(monitoring.source, message)
   }
 
   private def monitor(monitoring: Monitoring): Unit = {
@@ -93,7 +95,7 @@ class MonitoringService extends StrictLogging {
         }
       case Left(ex: InvalidLoginOrPasswordException) =>
         logger.error(s"User entered invalid name or password. Monitoring will be disabled", ex)
-        bot.sendMessage(monitoring.source, lang(monitoring.userId).invalidLoginOrPassword)
+        sendNotification(monitoring.source, lang(monitoring.userId).invalidLoginOrPassword)
         val activeUserMonitorings = dataService.getActiveMonitorings(monitoring.accountId)
         activeUserMonitorings.foreach { m =>
           deactivateMonitoring(m.accountId, m.recordId)
@@ -132,7 +134,7 @@ class MonitoringService extends StrictLogging {
   }
 
   def notifyChatAboutDisabledMonitoring(monitoring: Monitoring): Unit = {
-    bot.sendMessage(monitoring.source, lang(monitoring.userId).nothingWasFoundByMonitoring(monitoring))
+    sendNotification(monitoring.source, lang(monitoring.userId).nothingWasFoundByMonitoring(monitoring))
   }
 
   private def disableOutdated(): Unit = {
@@ -195,7 +197,7 @@ class MonitoringService extends StrictLogging {
     } yield response
     bookingResult match {
       case Right(_) =>
-        bot.sendMessage(monitoring.source, lang(monitoring.userId).appointmentIsBooked(term, monitoring))
+        sendNotification(monitoring.source, lang(monitoring.userId).appointmentIsBooked(term, monitoring))
         deactivateMonitoring(monitoring.accountId, monitoring.recordId)
       case Left(ex) =>
         logger.error(s"Unable to book appointment by monitoring [${monitoring.recordId}]", ex)
@@ -277,17 +279,46 @@ class MonitoringService extends StrictLogging {
               case Some(term) =>
                 bookAppointment(term, monitoring, rebookIfExists = true)
               case None =>
-                bot.sendMessage(monitoring.source, lang(monitoring.userId).termIsOutdated)
+                sendNotification(monitoring.source, lang(monitoring.userId).termIsOutdated)
             }
           case Left(ex: InvalidLoginOrPasswordException) =>
             logger.error(s"User entered invalid name or password. Monitoring will be disabled", ex)
-            bot.sendMessage(monitoring.source, lang(monitoring.userId).loginHasChangedOrWrong)
+            sendNotification(monitoring.source, lang(monitoring.userId).loginHasChangedOrWrong)
           case Left(ex) =>
             logger.error(s"Error occurred during receiving terms for monitoring [#${monitoring.recordId}]", ex)
         }
       case None =>
         logger.debug(s"Monitoring [#$monitoringId] not found in db")
     }
+  }
+
+  private def sendNotification(source: MessageSource, message: String): Unit = {
+    if (bot != null) {
+      bot.sendMessage(source, message)
+    } else if (webhookUrl != null && webhookUrl.nonEmpty) {
+      try {
+        val escapedChatId = escapeJson(source.chatId)
+        val escapedMessage = escapeJson(message)
+        val payload = s"""{"chatId":"$escapedChatId","sourceSystemId":${source.sourceSystem.id},"message":"$escapedMessage"}"""
+        scalaj.http.Http(webhookUrl)
+          .header("Content-Type", "application/json")
+          .postData(payload)
+          .timeout(connTimeoutMs = 5000, readTimeoutMs = 10000)
+          .asString
+      } catch {
+        case ex: Exception => logger.error("Failed to send webhook notification", ex)
+      }
+    } else {
+      logger.warn(s"No notification channel available. Message: $message")
+    }
+  }
+
+  private def escapeJson(s: String): String = {
+    s.replace("\\", "\\\\")
+      .replace("\"", "\\\"")
+      .replace("\n", "\\n")
+      .replace("\r", "\\r")
+      .replace("\t", "\\t")
   }
 
   implicit class MonitoringAsSource(monitoring: Monitoring) {

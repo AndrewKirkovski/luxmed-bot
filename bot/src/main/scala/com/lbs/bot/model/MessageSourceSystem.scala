@@ -9,7 +9,7 @@ trait MessageSourceSystem {
 }
 
 object MessageSourceSystem {
-  val MessageSourceSystems: Seq[MessageSourceSystem] = Seq(TelegramMessageSourceSystem, FacebookMessageSourceSystem)
+  val MessageSourceSystems: Seq[MessageSourceSystem] = Seq(TelegramMessageSourceSystem, FacebookMessageSourceSystem, ExternalApiMessageSourceSystem)
 
   private val MessageSourceSystemsMap = MessageSourceSystems.map(e => e.id -> e).toMap
 
@@ -28,4 +28,10 @@ object FacebookMessageSourceSystem extends MessageSourceSystem {
   override def id: Long = 2
 
   override def name: String = "Facebook"
+}
+
+object ExternalApiMessageSourceSystem extends MessageSourceSystem {
+  override def id: Long = 3
+
+  override def name: String = "ExternalApi"
 }
