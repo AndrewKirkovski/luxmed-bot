@@ -1,18 +1,20 @@
 spring:
   datasource:
-    url: "jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/lbs"
-    username: "lbs"
-    password: "lsb123"
+    url: "jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:lbs}"
+    username: "${DB_USER:lbs}"
+    password: "${DB_PASSWORD:}"
   jpa:
     properties:
       hibernate:
         ddl-auto: none
         temp:
           use_jdbc_metadata_defaults: "false"
-    database-platform: "org.hibernate.dialect.PostgreSQL9Dialect"
+    database-platform: "org.hibernate.dialect.PostgreSQLDialect"
     generate-ddl: "false"
   liquibase:
+    enabled: true
     change-log: classpath:db/liquibase-changelog.yml
+    show-summary: VERBOSE
   main:
     allow-circular-references: true
 
@@ -30,7 +32,7 @@ logging:
 server:
   port: ${SERVER_PORT:8080}
 
-security.secret: ${SECURITY_SECRET:random_secret_hfjdsk72euhdsbcgg6}
+security.secret: ${SECURITY_SECRET:}
 
 telegram:
   token: ${TELEGRAM_TOKEN:}

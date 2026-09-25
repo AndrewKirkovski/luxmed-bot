@@ -115,23 +115,51 @@ import java.time.{LocalDateTime, ZonedDateTime}
   */
 case class TermsIndexResponse(correlationId: String, termsForService: TermsForService) extends SerializableJsonObject
 
-case class TermsForService(additionalData: AdditionalData, termsForDays: List[TermsForDay])
-    extends SerializableJsonObject
+case class TermsForService(
+  additionalData: AdditionalData,
+  termsForDays: List[TermsForDay],
+  termsInfoForDays: List[TermsInfoForDay] = Nil
+) extends SerializableJsonObject
 
 case class PreparationItem(header: Option[String], text: Option[String])
 
 case class AdditionalData(isPreparationRequired: Boolean, preparationItems: List[PreparationItem])
 
+case class TermsInfoForDay(
+  day: LuxmedFunnyDateTime,
+  termsStatus: Int,
+  isLimitedDay: Boolean,
+  termsCounter: TermsCounter
+) extends SerializableJsonObject
+
+case class TermsCounter(
+  termsNumber: Int,
+  partialTermsCounters: List[PartialTermsCounter]
+) extends SerializableJsonObject
+
+case class PartialTermsCounter(
+  clinicGroupId: Option[Long],
+  doctorId: Long,
+  priority: Int,
+  termsNumber: Int
+) extends SerializableJsonObject
+
+case class OneDayTermsResponse(
+  correlationId: String,
+  serviceVariantId: Long,
+  termsForDay: TermsForDay
+) extends SerializableJsonObject
+
 case class TermsForDay(day: LuxmedFunnyDateTime, terms: List[Term]) extends SerializableJsonObject
 
 case class Term(
-  clinic: String,
+  clinic: Option[String],
   clinicId: Long,
   clinicGroupId: Long,
   dateTimeFrom: LuxmedFunnyDateTime,
   dateTimeTo: LuxmedFunnyDateTime,
   doctor: Doctor,
-  impedimentText: String,
+  impedimentText: Option[String],
   isAdditional: Boolean,
   isImpediment: Boolean,
   isTelemedicine: Boolean,

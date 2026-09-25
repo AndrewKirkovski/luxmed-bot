@@ -1,44 +1,48 @@
 package com.lbs.server.service
 
 import com.lbs.api.exception.InvalidLoginOrPasswordException
-import com.lbs.api.json.model._
+import com.lbs.api.json.model.*
 import com.lbs.bot.Bot
 import com.lbs.bot.model.{MessageSource, MessageSourceSystem}
+import com.lbs.bot.model.TelegramMessageSourceSystem
 import com.lbs.common.Scheduler
 import com.lbs.server.lang.Localization
-import com.lbs.server.repository.model._
-import com.lbs.bot.model.TelegramMessageSourceSystem
-import com.lbs.server.util.DateTimeUtil._
-import com.lbs.server.util.ServerModelConverters._
-import com.fasterxml.jackson.databind.ObjectMapper
+import com.lbs.server.repository.model.{*, given}
+import com.lbs.server.util.DateTimeUtil.*
+import com.lbs.server.util.ServerModelConverters.*
+import tools.jackson.databind.json.JsonMapper
 import com.typesafe.scalalogging.StrictLogging
+import jakarta.annotation.PostConstruct
 import org.springframework.beans.factory.annotation.{Autowired, Value}
 import org.springframework.stereotype.Service
 
 import java.time.{LocalDateTime, ZonedDateTime}
+import java.net.URI
+import java.net.http.{HttpClient, HttpRequest, HttpResponse}
 import java.util.concurrent.ScheduledFuture
-import javax.annotation.PostConstruct
 import scala.collection.mutable
-import scala.concurrent.duration._
+import scala.compiletime.uninitialized
+import scala.concurrent.duration.*
+import scala.language.implicitConversions
 import scala.util.Random
 
 @Service
 class MonitoringService extends StrictLogging {
 
   @Autowired(required = false)
-  private var bot: Bot = _
+  private var bot: Bot = uninitialized
   @Autowired
-  private var dataService: DataService = _
+  private var dataService: DataService = uninitialized
   @Value("${monitoring.webhook.url:}")
-  private var webhookUrl: String = _
+  private var webhookUrl: String = uninitialized
   @Autowired(required = false)
-  private var objectMapper: ObjectMapper = _
+  private var objectMapper: JsonMapper = uninitialized
   @Autowired
-  private var apiService: ApiService = _
+  private var apiService: ApiService = uninitialized
   @Autowired
-  private var localization: Localization = _
+  private var localization: Localization = uninitialized
 
-  private var activeMonitorings = mutable.Map.empty[JLong, (Monitoring, ScheduledFuture[_])]
+  private var activeMonitorings = mutable.Map.empty[JLong, (Monitoring, ScheduledFuture[?])]
 
   private val dbChecker = new Scheduler(1)
 
@@ -54,7 +58,7 @@ class MonitoringService extends StrictLogging {
 
   private def period = (PeriodBase.toSeconds + Random.nextInt(PeriodMaxDelta.toSeconds.toInt)).seconds
 
-  private var checkedOn: ZonedDateTime = _
+  private var checkedOn: ZonedDateTime = uninitialized
 
   def notifyUserAboutTerms(terms: Seq[TermExt], monitoring: Monitoring): Unit = {
     deactivateMonitoring(monitoring.accountId, monitoring.recordId)
@@ -73,17 +77,36 @@ class MonitoringService extends StrictLogging {
   private def monitor(monitoring: Monitoring): Unit = {
     logger.debug(s"Looking for available terms. Monitoring [#${monitoring.recordId}]")
     val dateFrom = optimizeDateFrom(monitoring.dateFrom.toLocalDateTime, monitoring.offset)
-    val termsEither = apiService.getAvailableTerms(
-      monitoring.accountId,
-      monitoring.cityId,
-      monitoring.clinicId,
-      monitoring.serviceId,
-      monitoring.doctorId,
-      dateFrom,
-      monitoring.dateTo.toLocalDateTime,
-      timeFrom = monitoring.timeFrom,
-      timeTo = monitoring.timeTo
-    )
+    val termsEither =
+      if (monitoring.isRehab) {
+        apiService.getAvailableRehabTerms(
+          monitoring.accountId,
+          monitoring.cityId,
+          monitoring.cityName,
+          monitoring.serviceVariantId,
+          Option(monitoring.serviceInstanceId).map(_.toLong).getOrElse(0L),
+          monitoring.referralId,
+          monitoring.referralTypeId,
+          dateFrom,
+          monitoring.dateTo.toLocalDateTime,
+          timeFrom = monitoring.timeFrom,
+          timeTo = monitoring.timeTo,
+          facilityId = Option(monitoring.clinicId).map(_.toLong),
+          doctorId = monitoring.doctorId
+        )
+      } else {
+        apiService.getAvailableTerms(
+          monitoring.accountId,
+          monitoring.cityId,
+          monitoring.clinicId,
+          monitoring.serviceId,
+          monitoring.doctorId,
+          dateFrom,
+          monitoring.dateTo.toLocalDateTime,
+          timeFrom = monitoring.timeFrom,
+          timeTo = monitoring.timeTo
+        )
+      }
     termsEither match {
       case Right(terms) =>
         if (terms.nonEmpty) {
@@ -167,10 +190,15 @@ class MonitoringService extends StrictLogging {
   private def bookAppointment(term: TermExt, monitoring: Monitoring, rebookIfExists: Boolean): Unit = {
     val bookingResult = for {
       xsrfToken <- apiService.getXsrfToken(monitoring.accountId)
+      locktermRequest =
+        if (monitoring.isRehab)
+          (term, monitoring.referralId.toLong, monitoring.referralTypeId.toInt).mapTo[ReservationLocktermRequest]
+        else
+          term.mapTo[ReservationLocktermRequest]
       reservationLocktermResponse <- apiService.reservationLockterm(
         monitoring.accountId,
         xsrfToken,
-        term.mapTo[ReservationLocktermRequest]
+        locktermRequest
       )
       temporaryReservationId = reservationLocktermResponse.value.temporaryReservationId
       response <-
@@ -297,7 +325,6 @@ class MonitoringService extends StrictLogging {
   }
 
   private def sendNotification(source: MessageSource, message: String): Unit = {
-    // Use Telegram bot only for Telegram-originated sources
     if (bot != null && source.sourceSystem == TelegramMessageSourceSystem) {
       bot.sendMessage(source, message)
     } else if (webhookUrl != null && webhookUrl.nonEmpty) {
@@ -309,32 +336,32 @@ class MonitoringService extends StrictLogging {
 
   private def sendWebhookNotification(source: MessageSource, message: String): Unit = {
     try {
-      val payload = if (objectMapper != null) {
-        objectMapper.writeValueAsString(Map(
-          "chatId" -> source.chatId,
-          "sourceSystemId" -> source.sourceSystem.id,
-          "message" -> message
-        ))
-      } else {
-        // Fallback if ObjectMapper not available
-        s"""{"chatId":"${source.chatId}","sourceSystemId":${source.sourceSystem.id},"message":"notification"}"""
-      }
-      val response = scalaj.http.Http(webhookUrl)
+      val payload = objectMapper.writeValueAsString(Map(
+        "chatId" -> source.chatId,
+        "sourceSystemId" -> source.sourceSystem.id,
+        "message" -> message
+      ))
+      val request = HttpRequest
+        .newBuilder(URI.create(webhookUrl))
         .header("Content-Type", "application/json")
-        .postData(payload)
-        .timeout(connTimeoutMs = 5000, readTimeoutMs = 10000)
-        .asString
-      if (!response.is2xx) {
-        logger.error(s"Webhook notification failed with status ${response.code}: ${response.body}")
+        .timeout(java.time.Duration.ofSeconds(10))
+        .POST(HttpRequest.BodyPublishers.ofString(payload))
+        .build()
+      val response = HttpClient
+        .newBuilder()
+        .connectTimeout(java.time.Duration.ofSeconds(5))
+        .build()
+        .send(request, HttpResponse.BodyHandlers.ofString())
+      if (response.statusCode / 100 != 2) {
+        logger.error(s"Webhook notification failed with status ${response.statusCode}: ${response.body}")
       }
     } catch {
       case ex: Exception => logger.error("Failed to send webhook notification", ex)
     }
   }
 
-  implicit class MonitoringAsSource(monitoring: Monitoring) {
+  extension (monitoring: Monitoring)
     def source: MessageSource = MessageSource(MessageSourceSystem(monitoring.sourceSystemId), monitoring.chatId)
-  }
 
   private def lang(userId: Long) = localization.lang(userId)
 

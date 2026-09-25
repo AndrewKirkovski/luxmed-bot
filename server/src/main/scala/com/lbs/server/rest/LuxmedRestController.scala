@@ -12,7 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.{HttpStatus, ResponseEntity}
 import org.springframework.web.bind.annotation._
 
-import java.time.{LocalDateTime, LocalTime, ZonedDateTime}
+import java.time.{LocalDateTime, LocalTime, OffsetDateTime, ZoneId, ZonedDateTime}
 
 @RestController
 @RequestMapping(Array("/api/v1"))
@@ -247,25 +247,26 @@ class LuxmedRestController extends StrictLogging {
   }
 
   private def buildTermExt(request: BookRequest): TermExt = {
-    val dateTimeFrom = LuxmedFunnyDateTime(dateTimeLocal = Some(LocalDateTime.parse(request.dateTimeFrom)))
-    val dateTimeTo = LuxmedFunnyDateTime(dateTimeLocal = Some(LocalDateTime.parse(request.dateTimeTo)))
+    val dateTimeFrom = LuxmedFunnyDateTime(dateTimeLocal = Some(parseDateTime(request.dateTimeFrom)))
+    val dateTimeTo = LuxmedFunnyDateTime(dateTimeLocal = Some(parseDateTime(request.dateTimeTo)))
+    def optional(value: String): Option[String] = Option(value).map(_.trim).filter(_.nonEmpty)
     val doctor = Doctor(
-      academicTitle = request.doctorAcademicTitle,
+      academicTitle = optional(request.doctorAcademicTitle),
       facilityGroupIds = None,
-      firstName = request.doctorFirstName,
+      firstName = optional(request.doctorFirstName),
       isEnglishSpeaker = None,
       genderId = None,
       id = request.doctorId,
-      lastName = request.doctorLastName
+      lastName = optional(request.doctorLastName)
     )
     val term = Term(
-      clinic = request.clinic,
+      clinic = optional(request.clinic),
       clinicId = request.clinicId,
       clinicGroupId = request.clinicGroupId,
       dateTimeFrom = dateTimeFrom,
       dateTimeTo = dateTimeTo,
       doctor = doctor,
-      impedimentText = "",
+      impedimentText = None,
       isAdditional = request.isAdditional,
       isImpediment = false,
       isTelemedicine = request.isTelemedicine,
@@ -278,5 +279,13 @@ class LuxmedRestController extends StrictLogging {
       preparationItems = List.empty
     )
     TermExt(additionalData, term)
+  }
+
+  private def parseDateTime(value: String): LocalDateTime = {
+    try {
+      OffsetDateTime.parse(value).atZoneSameInstant(ZoneId.of("Europe/Warsaw")).toLocalDateTime
+    } catch {
+      case _: java.time.format.DateTimeParseException => LocalDateTime.parse(value)
+    }
   }
 }
