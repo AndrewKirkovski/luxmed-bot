@@ -209,8 +209,8 @@ class LuxmedRestController extends StrictLogging {
           serviceName = request.serviceName,
           doctorId = request.doctorId,
           doctorName = request.doctorName,
-          dateFrom = ZonedDateTime.parse(request.dateFrom),
-          dateTo = ZonedDateTime.parse(request.dateTo),
+          dateFrom = parseZonedDateTime(request.dateFrom),
+          dateTo = parseZonedDateTime(request.dateTo),
           timeFrom = LocalTime.parse(request.timeFrom),
           timeTo = LocalTime.parse(request.timeTo),
           autobook = request.autobook,
@@ -286,6 +286,15 @@ class LuxmedRestController extends StrictLogging {
       OffsetDateTime.parse(value).atZoneSameInstant(ZoneId.of("Europe/Warsaw")).toLocalDateTime
     } catch {
       case _: java.time.format.DateTimeParseException => LocalDateTime.parse(value)
+    }
+  }
+
+  private def parseZonedDateTime(value: String): ZonedDateTime = {
+    try {
+      ZonedDateTime.parse(value)
+    } catch {
+      case _: java.time.format.DateTimeParseException =>
+        LocalDateTime.parse(value).atZone(ZoneId.of("Europe/Warsaw"))
     }
   }
 }
