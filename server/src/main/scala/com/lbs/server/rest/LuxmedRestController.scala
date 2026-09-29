@@ -252,8 +252,13 @@ class LuxmedRestController extends StrictLogging {
     }
   }
 
-  /** Old sidecar images do not have this path and therefore fail before booking. */
+  /** Old bot images receive a definite failure without reaching LuxMed. */
   @PostMapping(Array("/accounts/{accountId}/booking-attempts"))
+  def rejectOldSmartBookingAttempt(@PathVariable accountId: Long): ResponseEntity[_] =
+    ResponseEntity.ok(ApiResponse.ok(BookingOutcome("failed", errorCode = Some("BOT_UPGRADE_REQUIRED"))))
+
+  /** The versioned path prevents a new bot from submitting to an older sidecar after a rollback. */
+  @PostMapping(Array("/accounts/{accountId}/booking-attempts/v4"))
   def submitBookingAttempt(
     @PathVariable accountId: Long,
     @RequestBody request: BookRequest

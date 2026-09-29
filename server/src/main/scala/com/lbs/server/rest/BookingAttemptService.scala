@@ -663,9 +663,10 @@ class BookingAttemptService(jdbc: JdbcTemplate, transactionManager: PlatformTran
     }
     val outcome = try {
       book() match {
-        case Right(result) if !result.hasErrors && result.value != null && result.value.reservationId > 0 =>
+        case Right(result) if result != null && !result.hasErrors && Option(result.errors).exists(_.isEmpty)
+            && result.value != null && result.value.reservationId > 0
+            && request.baselineReservationIds.exists(ids => !ids.contains(result.value.reservationId)) =>
           val warningsNeedReview = result.hasWarnings || !Option(result.warnings).exists(_.isEmpty)
-            || !Option(result.errors).exists(_.isEmpty)
           BookingOutcome("succeeded", Some(result.value.reservationId),
             if (warningsNeedReview) Some("BOOKING_WARNINGS_REVIEW") else None)
         case Left(error: BookingRejectedException) if ownedPreparedAttempt(accountId, id) =>

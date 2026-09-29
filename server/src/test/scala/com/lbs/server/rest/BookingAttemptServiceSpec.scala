@@ -411,6 +411,31 @@ class BookingAttemptServiceSpec {
     assertEquals(Some("ACCOUNT_BUSY"), next.errorCode)
   }
 
+  @Test def nonemptyOrMissingErrorListCannotConfirmSmartBooking(): Unit = {
+    for (errors <- List(List("provider reported a booking error"), null: List[String])) {
+      val service = fixture()
+      val req = request()
+      val outcome = service.execute(1L, req)(() => Right(success.copy(errors = errors)))
+      assertEquals("unknown", outcome.state)
+      assertEquals(Some("VERIFY_RESERVATION"), outcome.errorCode)
+      assertEquals(outcome, service.status(1L, req.attemptId.get).get)
+      assertTrue(service.accountBusy(1L))
+      assertFalse(service.acknowledgeSmartBooking(1L, req.attemptId.get, 77L))
+    }
+  }
+
+  @Test def baselineReservationIdCannotConfirmAnotherSmartBooking(): Unit = {
+    val service = fixture()
+    val req = request().copy(baselineReservationIds = Some(List(77L)),
+      baselineReservations = Some(List(ReservationBaselineFact(77L, 1791288000000L, 1791289800000L,
+        Some(2L), false, Some("Street"), Some("Warsaw")))))
+    val outcome = service.execute(1L, req)(() => Right(success))
+    assertEquals("unknown", outcome.state)
+    assertEquals(Some("VERIFY_RESERVATION"), outcome.errorCode)
+    assertTrue(service.accountBusy(1L))
+    assertFalse(service.acknowledgeSmartBooking(1L, req.attemptId.get, 77L))
+  }
+
   @Test def confirmedBookingWarningsRemainOnTheDurableSuccessOutcome(): Unit = {
     val service = fixture()
     val req = request()
