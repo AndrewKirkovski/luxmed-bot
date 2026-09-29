@@ -241,7 +241,8 @@ class MonitoringService extends StrictLogging {
             apiService.reservationChangeTerm(
               _,
               xsrfToken,
-              (reservationLocktermResponse, term).mapTo[ReservationChangetermRequest]
+              (reservationLocktermResponse, term).mapTo[ReservationChangetermRequest],
+              barrierId
             )
           )
         } else {
@@ -252,7 +253,8 @@ class MonitoringService extends StrictLogging {
             apiService.reservationConfirm(
               _,
               xsrfToken,
-              (reservationLocktermResponse, term).mapTo[ReservationConfirmRequest]
+              (reservationLocktermResponse, term).mapTo[ReservationConfirmRequest],
+              barrierId
             )
           )
         }
@@ -313,11 +315,13 @@ class MonitoringService extends StrictLogging {
 
   def createMonitoring(monitoring: Monitoring): Monitoring = {
     bookingFence.withLock(monitoring.accountId) {
-      if (monitoring.autobook && bookingAttempts.identityHasSmartEnrollment(monitoring.accountId))
-        throw new com.lbs.server.rest.BookingRejectedException("SMART_BOOKING_ENROLLED")
-      val userMonitoringsCount = dataService.getActiveMonitoringsCount(monitoring.accountId)
-      require(userMonitoringsCount + 1 <= 10, lang(monitoring.userId).maximumMonitoringsLimitExceeded)
-      dataService.saveMonitoring(monitoring)
+      def save(): Monitoring = {
+        val userMonitoringsCount = dataService.getActiveMonitoringsCount(monitoring.accountId)
+        require(userMonitoringsCount + 1 <= 10, lang(monitoring.userId).maximumMonitoringsLimitExceeded)
+        dataService.saveMonitoring(monitoring)
+      }
+      if (monitoring.autobook) bookingAttempts.withAutoMonitorWrite(monitoring.accountId)(save())
+      else save()
     }
   }
 

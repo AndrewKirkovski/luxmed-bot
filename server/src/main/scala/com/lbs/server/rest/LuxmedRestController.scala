@@ -12,10 +12,14 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.http.{HttpStatus, ResponseEntity}
 import org.springframework.web.bind.annotation._
 
-import java.time.{LocalDateTime, LocalTime, OffsetDateTime, ZoneId, ZonedDateTime}
+import java.time.{Instant, LocalDateTime, LocalTime, OffsetDateTime, ZoneId, ZonedDateTime}
 import scala.util.control.NonFatal
 
-case class CancellationReviewRequest(expectedStartAt: Long, action: String, operator: String, reason: String)
+case class CancellationReviewRequest(expectedStartAt: Long, action: String, operator: String, reason: String,
+                                     providerRequestSettled: Boolean = false,
+                                     cancellationStatusVerified: Boolean = false,
+                                     expectedMovedStartAt: Option[Long] = None)
+case class CancellationMoveAcknowledgeRequest(expectedStartAt: Long, expectedMovedStartAt: Long)
 
 @RestController
 @RequestMapping(Array("/api/v1"))
@@ -47,7 +51,7 @@ class LuxmedRestController extends StrictLogging {
 
   @GetMapping(Array("/capabilities"))
   def capabilities(): ResponseEntity[_] =
-    ResponseEntity.ok(ApiResponse.ok(List("smart-booking-v1", "reservation-end-times-v1", "smart-booking-attempts-v2", "monitor-quiesce-v1", "reservation-range-complete-v1", "legacy-monitor-fence-v1", "legacy-booking-barrier-v1", "smart-booking-enrollment-fence-v1", "smart-booking-enrollment-fence-v2", "smart-booking-identity-fence-v1", "cancellation-receipts-v2")))
+    ResponseEntity.ok(ApiResponse.ok(List("smart-booking-v1", "reservation-end-times-v1", "smart-booking-attempts-v2", "smart-booking-attempts-v3", "smart-booking-attempts-v4", "monitor-quiesce-v1", "reservation-range-complete-v1", "legacy-monitor-fence-v1", "legacy-booking-barrier-v1", "legacy-booking-barrier-v2", "smart-booking-enrollment-fence-v1", "smart-booking-enrollment-fence-v2", "smart-booking-identity-fence-v1", "cancellation-receipts-v2", "cancellation-receipts-v3")))
 
   @GetMapping(Array("/accounts/{accountId}/smart-booking-enrollment"))
   def smartBookingEnrollment(@PathVariable accountId: Long): ResponseEntity[_] =
@@ -71,6 +75,45 @@ class LuxmedRestController extends StrictLogging {
   def bookingAttempt(@PathVariable accountId: Long, @PathVariable attemptId: String): ResponseEntity[_] =
     ResponseEntity.ok(ApiResponse.ok(bookingAttempts.status(accountId, attemptId).getOrElse(BookingOutcome("not_found"))))
 
+  @GetMapping(Array("/accounts/{accountId}/booking-attempts/{attemptId}/review-context"))
+  def bookingAttemptReviewContext(@PathVariable accountId: Long, @PathVariable attemptId: String): ResponseEntity[_] =
+    bookingAttempts.reviewContext(accountId, attemptId) match {
+      case Some(context) => ResponseEntity.ok(ApiResponse.ok(context))
+      case None => ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail("Booking review context is unavailable"))
+    }
+
+  @PostMapping(Array("/accounts/{accountId}/booking-attempts/{attemptId}/review"))
+  def reviewBookingAttempt(@PathVariable accountId: Long, @PathVariable attemptId: String,
+                           @RequestBody request: BookingPositiveReviewRequest): ResponseEntity[_] =
+    bookingFence.withLock(accountId) {
+      try {
+        val context = bookingAttempts.reviewContext(accountId, attemptId).getOrElse(
+          throw new BookingRejectedException("BOOKING_REVIEW_CONTEXT_MISSING"))
+        if (request == null || request.expectedStartAt != context.startAt ||
+            request.expectedEndAt != context.endAt || request.expectedClinicId != context.clinicId ||
+            request.expectedFingerprint != context.fingerprint)
+          throw new BookingRejectedException("BOOKING_REVIEW_TARGET_CHANGED")
+        val day = ZonedDateTime.ofInstant(Instant.ofEpochMilli(context.startAt), ZoneId.of("Europe/Warsaw"))
+          .toLocalDate.atStartOfDay(ZoneId.of("Europe/Warsaw"))
+        apiService.reservedVerified(accountId, day, day.plusDays(1)) match {
+          case Right(observed) => ResponseEntity.ok(ApiResponse.ok(
+            bookingAttempts.reviewPositiveAttempt(accountId, attemptId, request, observed)))
+          case Left(error) => handleResult(Left(error))
+        }
+      } catch {
+        case ex: BookingRejectedException => ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(ex.code))
+      }
+    }
+
+  @PostMapping(Array("/accounts/{accountId}/booking-attempts/{attemptId}/acknowledge"))
+  def acknowledgeBookingAttempt(@PathVariable accountId: Long, @PathVariable attemptId: String,
+                                @RequestBody request: SmartBookingAcknowledgeRequest): ResponseEntity[_] =
+    bookingFence.withLock(accountId) {
+      if (request != null && bookingAttempts.acknowledgeSmartBooking(accountId, attemptId, request.reservationId))
+        ResponseEntity.ok(ApiResponse.ok(BookingOutcome("succeeded", Some(request.reservationId))))
+      else ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail("Matching successful booking attempt was not found"))
+    }
+
   @GetMapping(Array("/accounts/{accountId}/legacy-booking-barrier"))
   def legacyBookingBarrier(@PathVariable accountId: Long): ResponseEntity[_] =
     ResponseEntity.ok(ApiResponse.ok(bookingAttempts.legacyBarrier(accountId)))
@@ -80,7 +123,13 @@ class LuxmedRestController extends StrictLogging {
     @PathVariable accountId: Long,
     @RequestBody request: LegacyBookingAcknowledgeRequest
   ): ResponseEntity[_] = bookingFence.withLock(accountId) {
-    if (bookingAttempts.acknowledgeLegacyBooking(accountId, request.reservationId))
+    if (request != null && (request.id match {
+        case Some(id) => request.expectedStartAt.exists(start =>
+          bookingAttempts.acknowledgeLegacyBooking(accountId, id, request.reservationId, start))
+        case None if request.expectedStartAt.isEmpty =>
+          bookingAttempts.acknowledgeLegacyBookingV1(accountId, request.reservationId)
+        case None => false
+      }))
       ResponseEntity.ok(ApiResponse.ok("Acknowledged"))
     else ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail("Matching verified legacy booking barrier was not found"))
   }
@@ -169,7 +218,7 @@ class LuxmedRestController extends StrictLogging {
     @PathVariable accountId: Long,
     @RequestBody request: BookRequest
   ): ResponseEntity[_] = {
-    bookingFence.withLock(accountId) {
+    try bookingFence.withLock(accountId) {
       if (request.attemptId.nonEmpty)
         ResponseEntity.badRequest().body(ApiResponse.fail("Use booking-attempts for an idempotent booking request"))
       else if (bookingAttempts.identityHasSmartEnrollment(accountId))
@@ -182,7 +231,7 @@ class LuxmedRestController extends StrictLogging {
         val start = parseZonedDateTime(request.dateTimeFrom).toInstant.toEpochMilli
         val barrierId = bookingAttempts.beginLegacyBooking(accountId, start)
         var confirmationStarted = false
-        val result = try performBooking(accountId, request, () =>
+        val result = try performBooking(accountId, request, barrierId, () =>
           bookingAttempts.markLegacyConfirmationStarted(accountId, barrierId).map { _ => confirmationStarted = true })
         catch { case NonFatal(error) => Left(error) }
         val confirmed = result match {
@@ -198,6 +247,8 @@ class LuxmedRestController extends StrictLogging {
           ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail("Legacy booking confirmation requires verification"))
         else handleResult(result)
       }
+    } catch {
+      case ex: BookingRejectedException => ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(ex.code))
     }
   }
 
@@ -239,8 +290,17 @@ class LuxmedRestController extends StrictLogging {
                   barrier match {
                     case Left(error) => Left(error)
                     case Right(value) if value.state != "clear" => Left(new BookingRejectedException("LEGACY_BOOKING_BARRIER"))
-                    case Right(_) => performBooking(accountId, request,
-                      () => bookingAttempts.markSmartConfirmationStarted(accountId, request.attemptId.get))
+                    case Right(_) => performBooking(accountId, request, request.attemptId.get, () => {
+                      val day = parseZonedDateTime(request.dateTimeFrom).withZoneSameInstant(ZoneId.of("Europe/Warsaw")).toLocalDate
+                      val from = day.minusDays(1).atStartOfDay(ZoneId.of("Europe/Warsaw"))
+                      val to = day.plusDays(2).atStartOfDay(ZoneId.of("Europe/Warsaw"))
+                      apiService.reservedVerified(accountId, from, to)
+                        .flatMap { observed =>
+                          BookingAttemptService.verifyReservationBaseline(request, observed,
+                            from.toInstant.toEpochMilli, to.toInstant.toEpochMilli)
+                            .flatMap(_ => bookingAttempts.markSmartConfirmationStarted(accountId, request.attemptId.get))
+                        }
+                    })
                   }
               }
           }
@@ -249,7 +309,7 @@ class LuxmedRestController extends StrictLogging {
     }
   }
 
-  private def performBooking(accountId: Long, request: BookRequest,
+  private def performBooking(accountId: Long, request: BookRequest, ownerId: String,
                              onConfirmationStarted: () => Either[Throwable, Unit] = () => Right(())): Either[Throwable, ReservationConfirmResponse] = {
     val termExt = buildTermExt(request)
     var confirmationStarted = false
@@ -275,12 +335,14 @@ class LuxmedRestController extends StrictLogging {
           logger.info(s"Service already booked. Trying to change term")
           bookOrUnlockTerm(
             accountId, xsrfToken, temporaryReservationId,
-            apiService.reservationChangeTerm(_, xsrfToken, (locktermResponse, termExt).mapTo[ReservationChangetermRequest])
+            apiService.reservationChangeTerm(_, xsrfToken, (locktermResponse, termExt).mapTo[ReservationChangetermRequest],
+              ownerId)
           )
         } else {
           bookOrUnlockTerm(
             accountId, xsrfToken, temporaryReservationId,
-            apiService.reservationConfirm(_, xsrfToken, (locktermResponse, termExt).mapTo[ReservationConfirmRequest])
+            apiService.reservationConfirm(_, xsrfToken, (locktermResponse, termExt).mapTo[ReservationConfirmRequest],
+              ownerId)
           )
         }
       }
@@ -322,12 +384,28 @@ class LuxmedRestController extends StrictLogging {
         Option(request).map(_.expectedStartAt).getOrElse(0L),
         Option(request).map(_.action).orNull,
         Option(request).map(_.operator).orNull,
-        Option(request).map(_.reason).orNull)
+        Option(request).map(_.reason).orNull,
+        Option(request).exists(_.providerRequestSettled),
+        Option(request).exists(_.cancellationStatusVerified),
+        Option(request).flatMap(_.expectedMovedStartAt))
       ResponseEntity.ok(ApiResponse.ok(reviewed))
     } catch {
       case ex: BookingRejectedException => ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(ex.code))
       case NonFatal(ex) => ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
         .body(ApiResponse.fail(Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)))
+    }
+  }
+
+  @PostMapping(Array("/accounts/{accountId}/visits/cancellation-receipts/{reservationId}/acknowledge-move"))
+  def acknowledgeMovedCancellation(@PathVariable accountId: Long, @PathVariable reservationId: Long,
+                                   @RequestBody request: CancellationMoveAcknowledgeRequest): ResponseEntity[_] = {
+    try {
+      if (request != null && bookingCancellation.acknowledgeMove(accountId, reservationId,
+          request.expectedStartAt, request.expectedMovedStartAt))
+        ResponseEntity.ok(ApiResponse.ok("Acknowledged"))
+      else ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail("Matching moved reservation was not found"))
+    } catch {
+      case ex: BookingRejectedException => ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(ex.code))
     }
   }
 

@@ -7,7 +7,8 @@ import com.lbs.server.rest.{ApiResponse, BookingAttemptService, BookingRejectedE
 import com.lbs.server.util.DateTimeUtil
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import org.mockito.Mockito.{mock, verify, verifyNoMoreInteractions, when}
+import org.mockito.ArgumentMatchers.{any, anyLong}
+import org.mockito.Mockito.{doAnswer, mock, verify, when}
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.datasource.DriverManagerDataSource
 
@@ -25,10 +26,12 @@ class BookingCancellationServiceSpec {
     var deletion: ThrowableOr[LuxmedResponse[String]] = Right(LuxmedResponse("", 200, Nil))
     var reads = 0
     var deletes = 0
+    var lastCoverage: Option[(ZonedDateTime, ZonedDateTime)] = None
 
     override def reserved(accountId: Long, fromDate: LocalDateTime, toDate: LocalDateTime): ThrowableOr[List[Event]] = upcoming
     override def reservedVerified(accountId: Long, fromDate: ZonedDateTime, toDate: ZonedDateTime): ThrowableOr[List[Event]] = {
       reads += 1
+      lastCoverage = Some((fromDate, toDate))
       val result = verified.headOption.getOrElse(Left(new IllegalStateException("No verified response")))
       verified = verified.drop(1)
       result
@@ -49,13 +52,12 @@ class BookingCancellationServiceSpec {
   }
 
   @Test def aSuccessfulDeleteStillRequiresOperatorReview(): Unit = {
-    val (cancellation, api, _, _, receipts) = fixture()
+    val (cancellation, api, attempts, _, _) = fixture()
     assertEquals("CANCELLATION_REVIEW_REQUIRED",
       cancellation.cancel(1L, 77L).left.toOption.get.asInstanceOf[BookingRejectedException].code)
     assertEquals(1, api.reads)
     assertEquals(1, api.deletes)
-    verify(receipts).begin(1L, 77L, visit.date.toInstant.toEpochMilli)
-    verifyNoMoreInteractions(receipts)
+    verify(attempts).beginCancellation(1L, 77L, visit.date.toInstant.toEpochMilli)
   }
 
   @Test def pendingSmartOrLegacyOutcomePreventsDeletion(): Unit = {
@@ -95,12 +97,11 @@ class BookingCancellationServiceSpec {
   }
 
   @Test def providerErrorLeavesReceiptPendingWithoutAnyFollowupRead(): Unit = {
-    val (cancellation, api, _, _, receipts) = fixture()
+    val (cancellation, api, attempts, _, _) = fixture()
     api.deletion = Left(new IllegalStateException("Provider response lost"))
     assertTrue(cancellation.cancel(1L, 77L).isLeft)
     assertEquals(1, api.reads)
-    verify(receipts).begin(1L, 77L, visit.date.toInstant.toEpochMilli)
-    verifyNoMoreInteractions(receipts)
+    verify(attempts).beginCancellation(1L, 77L, visit.date.toInstant.toEpochMilli)
   }
 
   @Test def cancellationWaitsForTheAccountBookingFence(): Unit = {
@@ -142,8 +143,11 @@ class BookingCancellationServiceSpec {
     val source = new DriverManagerDataSource(s"jdbc:h2:mem:${UUID.randomUUID()};DB_CLOSE_DELAY=-1", "sa", "")
     val jdbc = new JdbcTemplate(source)
     jdbc.execute("CREATE TABLE cancellation_receipt(account_id BIGINT NOT NULL, reservation_id BIGINT NOT NULL, start_at BIGINT NOT NULL, state VARCHAR(32) NOT NULL, requested_at BIGINT NOT NULL, confirmed_at BIGINT, reviewed_at BIGINT, reviewed_by VARCHAR(128), review_reason VARCHAR(1000), review_action VARCHAR(32), PRIMARY KEY(account_id,reservation_id))")
-    val cancellation = new BookingCancellationService(api, attempts, new AccountBookingFence(),
-      new CancellationReceiptService(jdbc))
+    jdbc.execute("ALTER TABLE cancellation_receipt ADD COLUMN moved_acknowledged_at BIGINT")
+    val receipts = new CancellationReceiptService(jdbc)
+    doAnswer(_ => { receipts.begin(1L, 77L, visit.date.toInstant.toEpochMilli); null })
+      .when(attempts).beginCancellation(1L, 77L, visit.date.toInstant.toEpochMilli)
+    val cancellation = new BookingCancellationService(api, attempts, new AccountBookingFence(), receipts)
     val controller = new LuxmedRestController()
     val field = classOf[LuxmedRestController].getDeclaredField("bookingCancellation")
     field.setAccessible(true)
@@ -159,9 +163,11 @@ class BookingCancellationServiceSpec {
   }
 
   @Test def reviewUsesTheAccountFenceAndNeverCallsProviderDelete(): Unit = {
-    val (cancellation, api, _, fence, receipts) = fixture()
+    val (cancellation, api, attempts, fence, _) = fixture()
+    api.verified = List(Right(List(visit)), Right(List(visit)))
     val startAt = visit.date.toInstant.toEpochMilli
-    when(receipts.review(1L, 77L, startAt, "verified_still_reserved", "operator", "Still on account"))
+    when(attempts.reviewCancellation(1L, 77L, startAt, "verified_still_reserved", "operator", "Still on account",
+      true, false, None, List(visit)))
       .thenReturn(CancellationReceipt(1L, 77L, startAt, "verified_still_reserved"))
     val entered = new CountDownLatch(1)
     val release = new CountDownLatch(1)
@@ -170,7 +176,7 @@ class BookingCancellationServiceSpec {
     assertTrue(entered.await(2, TimeUnit.SECONDS))
     val result = new AtomicReference[CancellationReceipt]()
     val reviewer = new Thread(() => result.set(cancellation.review(1L, 77L, startAt,
-      "verified_still_reserved", "operator", "Still on account")))
+      "verified_still_reserved", "operator", "Still on account", true, false)))
     reviewer.start()
     Thread.sleep(100)
     assertTrue(reviewer.isAlive)
@@ -185,7 +191,48 @@ class BookingCancellationServiceSpec {
     field.setAccessible(true)
     field.set(controller, cancellation)
     assertEquals(200, controller.reviewCancellation(1L, 77L,
-      CancellationReviewRequest(startAt, "verified_still_reserved", "operator", "Still on account"))
+      CancellationReviewRequest(startAt, "verified_still_reserved", "operator", "Still on account", true))
       .getStatusCode.value())
+  }
+
+  @Test def reviewRequiresSettledProviderAndCompleteExactDayFeed(): Unit = {
+    val (cancellation, api, attempts, _, _) = fixture()
+    val startAt = visit.date.toInstant.toEpochMilli
+    assertThrows(classOf[BookingRejectedException], () => cancellation.review(1L, 77L, startAt,
+      "confirmed_cancelled", "operator", "Checked portal", false, false))
+    assertEquals(0, api.reads)
+    assertThrows(classOf[BookingRejectedException], () => cancellation.review(1L, 77L, startAt,
+      "confirmed_cancelled", "operator", "Checked portal", true, false))
+    assertEquals(0, api.reads)
+    api.verified = List(Left(new IllegalStateException("Incomplete feed")))
+    assertThrows(classOf[BookingRejectedException], () => cancellation.review(1L, 77L, startAt,
+      "confirmed_cancelled", "operator", "Checked portal", true, true))
+    assertTrue(api.lastCoverage.get._2.isAfter(visit.date.plusMonths(11)),
+      "cancelled review must check a broad future range for moved reservations")
+    verify(attempts, org.mockito.Mockito.never()).reviewCancellation(anyLong(), anyLong(), anyLong(),
+      any(), any(), any(), org.mockito.ArgumentMatchers.anyBoolean(),
+      org.mockito.ArgumentMatchers.anyBoolean(), any(), any())
+  }
+
+  @Test def movedReviewRequiresCompleteCoverageOfOldAndNewDays(): Unit = {
+    val (cancellation, api, attempts, _, _) = fixture()
+    val original = visit.date.toInstant.toEpochMilli
+    val moved = visit.copy(date = visit.date.plusDays(2),
+      dateTo = Some(visit.date.plusDays(2).plusMinutes(30)),
+      eventType = Some("Telemedicine"))
+    val movedAt = moved.date.toInstant.toEpochMilli
+    api.verified = List(Right(List(moved)))
+    when(attempts.reviewCancellation(1L, 77L, original, "verified_moved", "operator", "Moved in portal",
+      true, false, Some(movedAt), List(moved)))
+      .thenReturn(CancellationReceipt(1L, 77L, original, "verified_moved", movedStartAt = Some(movedAt)))
+    val reviewed = cancellation.review(1L, 77L, original, "verified_moved", "operator", "Moved in portal",
+      true, false, Some(movedAt))
+    assertEquals("verified_moved", reviewed.state)
+    assertFalse(api.lastCoverage.get._1.isAfter(visit.date))
+    assertTrue(api.lastCoverage.get._2.isAfter(moved.date))
+
+    api.verified = List(Left(new IllegalStateException("Incomplete coverage")))
+    assertThrows(classOf[BookingRejectedException], () => cancellation.review(1L, 77L, original,
+      "verified_moved", "operator", "Moved in portal", true, false, Some(movedAt)))
   }
 }

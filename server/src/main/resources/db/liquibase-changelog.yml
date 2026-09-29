@@ -41,3 +41,6 @@ databaseChangeLog:
 - include:
       file: changelog/13-cancellation-review.yml
       relativeToChangelogFile: true
+- include:
+      file: changelog/14-booking-recovery.yml
+      relativeToChangelogFile: true

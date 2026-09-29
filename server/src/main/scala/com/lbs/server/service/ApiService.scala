@@ -5,15 +5,16 @@ import com.lbs.api.LuxmedApi
 import com.lbs.api.http.{LuxmedResponse, Session}
 import com.lbs.api.json.model.*
 import com.lbs.server.ThrowableOr
-import com.lbs.server.rest.BookingRejectedException
+import com.lbs.server.rest.{BookingAttemptService, BookingRejectedException}
 import com.lbs.server.util.DateTimeUtil
 import org.jasypt.util.text.TextEncryptor
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 
 import java.net.HttpCookie
-import java.time.{LocalDateTime, LocalTime, ZonedDateTime}
+import java.time.{LocalDateTime, LocalTime, OffsetDateTime, ZonedDateTime}
 import scala.compiletime.uninitialized
+import scala.util.control.NonFatal
 
 @Service
 class ApiService extends SessionSupport {
@@ -26,6 +27,8 @@ class ApiService extends SessionSupport {
   private var cancellationReceipts: CancellationReceiptService = uninitialized
   @Autowired
   private var bookingFence: AccountBookingFence = uninitialized
+  @Autowired
+  private var bookingAttempts: BookingAttemptService = uninitialized
 
   private val luxmedApi = new LuxmedApi[ThrowableOr]
 
@@ -182,23 +185,94 @@ class ApiService extends SessionSupport {
     accountId: Long,
     xsrfToken: XsrfToken,
     reservationConfirmRequest: ReservationConfirmRequest
-  ): ThrowableOr[ReservationConfirmResponse] = bookingFence.withLock(accountId) {
-    if (cancellationReceipts.hasPending(accountId)) Left(new BookingRejectedException("CANCELLATION_UNRESOLVED"))
-    else withSession(accountId) { session =>
+  ): ThrowableOr[ReservationConfirmResponse] =
+    chatReservation(accountId, Option(reservationConfirmRequest).map(_.date).orNull) { session =>
       luxmedApi.reservationConfirm(session, xsrfToken, reservationConfirmRequest)
     }
-  }
+
+  /** Smart and legacy coordinators pass their exact durable owner ID. */
+  def reservationConfirm(
+    accountId: Long,
+    xsrfToken: XsrfToken,
+    reservationConfirmRequest: ReservationConfirmRequest,
+    ownerId: String
+  ): ThrowableOr[ReservationConfirmResponse] =
+    reservationWithOwner(accountId, ownerId) { session =>
+      luxmedApi.reservationConfirm(session, xsrfToken, reservationConfirmRequest)
+    }
 
   def reservationChangeTerm(
     accountId: Long,
     xsrfToken: XsrfToken,
     reservationChangetermRequest: ReservationChangetermRequest
-  ): ThrowableOr[ReservationConfirmResponse] = bookingFence.withLock(accountId) {
-    if (cancellationReceipts.hasPending(accountId)) Left(new BookingRejectedException("CANCELLATION_UNRESOLVED"))
-    else withSession(accountId) { session =>
+  ): ThrowableOr[ReservationConfirmResponse] =
+    chatReservation(accountId, Option(reservationChangetermRequest).flatMap(r => Option(r.term)).map(_.date).orNull) { session =>
       luxmedApi.reservationChangeTerm(session, xsrfToken, reservationChangetermRequest)
     }
-  }
+
+  def reservationChangeTerm(
+    accountId: Long,
+    xsrfToken: XsrfToken,
+    reservationChangetermRequest: ReservationChangetermRequest,
+    ownerId: String
+  ): ThrowableOr[ReservationConfirmResponse] =
+    reservationWithOwner(accountId, ownerId) { session =>
+      luxmedApi.reservationChangeTerm(session, xsrfToken, reservationChangetermRequest)
+    }
+
+  private def reservationWithOwner(accountId: Long, ownerId: String)
+                                  (confirm: Session => ThrowableOr[ReservationConfirmResponse]): ThrowableOr[ReservationConfirmResponse] =
+    bookingFence.withLock(accountId) {
+      if (cancellationReceipts.hasPending(accountId)) Left(new BookingRejectedException("CANCELLATION_UNRESOLVED"))
+      else if (!bookingAttempts.ownsConfirmationPermit(accountId, ownerId))
+        Left(new BookingRejectedException("BOOKING_PERMIT_REQUIRED"))
+      else withSession(accountId)(confirm)
+    }
+
+  /** The three-argument API is used by interactive chat actions. It obtains its
+    * own account permit and keeps a successful receipt until the bot acknowledges it.
+    */
+  private def chatReservation(accountId: Long, date: String)
+                             (confirm: Session => ThrowableOr[ReservationConfirmResponse]): ThrowableOr[ReservationConfirmResponse] =
+    bookingFence.withLock(accountId) {
+      if (cancellationReceipts.hasPending(accountId)) Left(new BookingRejectedException("CANCELLATION_UNRESOLVED"))
+      else {
+        val start = try Right {
+          try OffsetDateTime.parse(date).toInstant.toEpochMilli
+          catch { case _: java.time.format.DateTimeParseException =>
+            LocalDateTime.parse(date).atZone(DateTimeUtil.Zone).toInstant.toEpochMilli
+          }
+        } catch { case NonFatal(_) => Left(new BookingRejectedException("INVALID_BOOKING_TIME")) }
+        start.flatMap { startAt =>
+          val begun = try Right(bookingAttempts.beginLegacyBooking(accountId, startAt))
+          catch { case NonFatal(error) => Left(error) }
+          begun.flatMap { id =>
+            var confirmationStarted = false
+            val result = try withSession(accountId) { session =>
+              bookingAttempts.markLegacyConfirmationStarted(accountId, id).flatMap { _ =>
+                confirmationStarted = true
+                if (!bookingAttempts.ownsConfirmationPermit(accountId, id))
+                  Left(new BookingRejectedException("BOOKING_PERMIT_REQUIRED"))
+                else confirm(session)
+              }
+            } catch { case NonFatal(error) => Left(error) }
+            result match {
+              case Right(response) if response != null && !response.hasErrors && response.value != null && response.value.reservationId > 0 =>
+                try {
+                  bookingAttempts.completeLegacyBooking(accountId, id, response.value.reservationId)
+                  Right(response)
+                } catch { case NonFatal(error) => Left(error) }
+              case _ =>
+                if (!confirmationStarted) bookingAttempts.clearLegacyBeforeSubmission(accountId, id)
+                result match {
+                  case Right(_) => Left(new BookingRejectedException("CONFIRMATION_REQUIRES_VERIFICATION"))
+                  case other => other
+                }
+            }
+          }
+        }
+      }
+    }
 
   def history(
     accountId: Long,

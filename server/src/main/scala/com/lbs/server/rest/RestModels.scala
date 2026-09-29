@@ -15,6 +15,10 @@ case class SearchTermsRequest(
   timeTo: String
 )
 
+case class ReservationBaselineFact(reservationId: Long, startAt: Long, endAt: Long,
+                                   clinicId: Option[Long], telemedicine: Boolean,
+                                   clinicAddress: Option[String], clinicCity: Option[String])
+
 case class BookRequest(
   cityId: Long,
   clinicId: Long,
@@ -36,7 +40,9 @@ case class BookRequest(
   isPreparationRequired: Boolean = false,
   preparationItems: List[PreparationItem] = List.empty,
   rebookIfExists: Boolean = false,
-  attemptId: Option[String] = None
+  attemptId: Option[String] = None,
+  baselineReservationIds: Option[List[Long]] = None,
+  baselineReservations: Option[List[ReservationBaselineFact]] = None
 )
 
 case class CreateMonitoringRequest(
