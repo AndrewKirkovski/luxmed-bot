@@ -120,9 +120,18 @@ object BookingAttemptService {
     } catch { case ex: BookingRejectedException => Left(ex) }
   }
 
-  def validateLockterm(result: ReservationLocktermResponse, allowChange: Boolean): Either[Throwable, Unit] = {
-    if (result.hasErrors || result.value == null || result.value.temporaryReservationId <= 0)
+  def validateLockterm(result: ReservationLocktermResponse, allowChange: Boolean,
+                       expectedDoctorId: Option[Long] = None): Either[Throwable, Unit] = {
+    if (result == null || result.hasErrors || result.value == null || result.value.temporaryReservationId <= 0)
       Left(new BookingRejectedException("BOOKING_REJECTED"))
+    else if (expectedDoctorId.nonEmpty && (!Option(result.errors).exists(_.isEmpty)
+      || result.hasWarnings || !Option(result.warnings).exists(_.isEmpty)
+      || result.value.conflictedVisit == null || result.value.conflictedVisit.nonEmpty
+      || !Option(result.value.doctorDetails).exists(_.id == expectedDoctorId.get)
+      || !result.value.askForReferral.contains(false)
+      || !result.value.isBloodExamination.contains(false)
+      || !result.value.isStomatology.contains(false)))
+      Left(new BookingRejectedException("LOCKTERM_REQUIRES_REVIEW"))
     else if (!Option(result.value.valuations).exists(_.headOption.exists(_ != null)))
       Left(new BookingRejectedException("INCOMPLETE_LOCKTERM"))
     else if ({
@@ -655,7 +664,10 @@ class BookingAttemptService(jdbc: JdbcTemplate, transactionManager: PlatformTran
     val outcome = try {
       book() match {
         case Right(result) if !result.hasErrors && result.value != null && result.value.reservationId > 0 =>
-          BookingOutcome("succeeded", Some(result.value.reservationId))
+          val warningsNeedReview = result.hasWarnings || !Option(result.warnings).exists(_.isEmpty)
+            || !Option(result.errors).exists(_.isEmpty)
+          BookingOutcome("succeeded", Some(result.value.reservationId),
+            if (warningsNeedReview) Some("BOOKING_WARNINGS_REVIEW") else None)
         case Left(error: BookingRejectedException) if ownedPreparedAttempt(accountId, id) =>
           BookingOutcome("failed", errorCode = Some(error.code))
         case Left(_: BookingNotSubmittedException) if ownedPreparedAttempt(accountId, id) =>

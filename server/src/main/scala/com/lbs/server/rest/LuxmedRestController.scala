@@ -51,7 +51,7 @@ class LuxmedRestController extends StrictLogging {
 
   @GetMapping(Array("/capabilities"))
   def capabilities(): ResponseEntity[_] =
-    ResponseEntity.ok(ApiResponse.ok(List("smart-booking-v1", "reservation-end-times-v1", "smart-booking-attempts-v2", "smart-booking-attempts-v3", "smart-booking-attempts-v4", "monitor-quiesce-v1", "reservation-range-complete-v1", "legacy-monitor-fence-v1", "legacy-booking-barrier-v1", "legacy-booking-barrier-v2", "smart-booking-enrollment-fence-v1", "smart-booking-enrollment-fence-v2", "smart-booking-identity-fence-v1", "cancellation-receipts-v2", "cancellation-receipts-v3")))
+    ResponseEntity.ok(ApiResponse.ok(List("smart-booking-v1", "reservation-end-times-v1", "smart-booking-attempts-v2", "smart-booking-attempts-v3", "smart-booking-attempts-v4", "smart-booking-lockterm-review-v1", "monitor-quiesce-v1", "reservation-range-complete-v1", "legacy-monitor-fence-v1", "legacy-booking-barrier-v1", "legacy-booking-barrier-v2", "smart-booking-enrollment-fence-v1", "smart-booking-enrollment-fence-v2", "smart-booking-identity-fence-v1", "cancellation-receipts-v2", "cancellation-receipts-v3")))
 
   @GetMapping(Array("/accounts/{accountId}/smart-booking-enrollment"))
   def smartBookingEnrollment(@PathVariable accountId: Long): ResponseEntity[_] =
@@ -317,7 +317,8 @@ class LuxmedRestController extends StrictLogging {
     val result = for {
       xsrfToken <- apiService.getXsrfToken(accountId)
       locktermResponse <- apiService.reservationLockterm(accountId, xsrfToken, termExt.mapTo[ReservationLocktermRequest])
-      _ <- BookingAttemptService.validateLockterm(locktermResponse, request.rebookIfExists).left.map { error =>
+      _ <- BookingAttemptService.validateLockterm(locktermResponse, request.rebookIfExists,
+        request.attemptId.map(_ => request.doctorId)).left.map { error =>
         Option(locktermResponse.value).filter(_.temporaryReservationId > 0).foreach(value =>
           apiService.deleteTemporaryReservation(accountId, xsrfToken, value.temporaryReservationId)
         )

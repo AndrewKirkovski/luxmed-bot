@@ -75,7 +75,10 @@ case class ReservationLocktermResponseValue(
   doctorDetails: Doctor,
   relatedVisits: List[RelatedVisit],
   temporaryReservationId: Long,
-  valuations: List[Valuation]
+  valuations: List[Valuation],
+  askForReferral: Option[Boolean] = None,
+  isBloodExamination: Option[Boolean] = None,
+  isStomatology: Option[Boolean] = None
 ) extends SerializableJsonObject
 
 case class RelatedVisit(

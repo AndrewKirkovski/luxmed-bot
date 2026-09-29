@@ -119,6 +119,9 @@ class JsonSerializerSpec extends AnyFunSuite with Matchers {
         |  "warnings": [],
         |  "value": {
         |    "change_term_available": false,
+        |    "ask_for_referral": true,
+        |    "is_blood_examination": false,
+        |    "is_stomatology": false,
         |    "conflicted_visit": null,
         |    "doctor_details": {
         |      "academic_title": "lek. med.",
@@ -154,6 +157,9 @@ class JsonSerializerSpec extends AnyFunSuite with Matchers {
     result.errors                                  shouldBe empty
     result.value.temporaryReservationId            shouldBe 222222L
     result.value.changeTermAvailable               shouldBe false
+    result.value.askForReferral                      shouldBe Some(true)
+    result.value.isBloodExamination                  shouldBe Some(false)
+    result.value.isStomatology                       shouldBe Some(false)
     result.value.conflictedVisit                   shouldBe None
     result.value.doctorDetails.firstName           shouldBe Some("TARAS")
     result.value.valuations                        should have size 1

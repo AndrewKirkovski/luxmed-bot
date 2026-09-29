@@ -81,6 +81,10 @@ class BookingAttemptServiceSpec {
     monitorings.bookAppointmentByScheduleId(1L, 10L, 1000L, time)
   }
   private val success = ReservationConfirmResponse(Nil, Nil, false, false, ReservationConfirmValue(false, "fixture", 77, 88))
+  private val selectedDoctor = Doctor(None, None, None, None, None, 3L, None)
+  private def safeLockValue(valuation: Valuation): ReservationLocktermResponseValue =
+    ReservationLocktermResponseValue(false, None, selectedDoctor, Nil, 123L, List(valuation),
+      askForReferral = Some(false), isBloodExamination = Some(false), isStomatology = Some(false))
   private def controllerWith(service: BookingAttemptService, monitorings: MonitoringService,
                              api: ApiService = null, smartEnrolled: Boolean = true): LuxmedRestController = {
     if (smartEnrolled) service.enrollSmartBooking(1L)
@@ -306,7 +310,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, monitorings, api)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenAnswer(_ => {
       assertEquals(1, restarted.recoverPreparedAfterRestart())
@@ -378,7 +382,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, mock(classOf[MonitoringService]), api, smartEnrolled = false)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenAnswer(_ => {
       assertEquals(1, restarted.recoverPreparedAfterRestart())
@@ -407,6 +411,17 @@ class BookingAttemptServiceSpec {
     assertEquals(Some("ACCOUNT_BUSY"), next.errorCode)
   }
 
+  @Test def confirmedBookingWarningsRemainOnTheDurableSuccessOutcome(): Unit = {
+    val service = fixture()
+    val req = request()
+    val outcome = service.execute(1L, req)(() => Right(success.copy(hasWarnings = true, warnings = List("review instructions"))))
+    assertEquals("succeeded", outcome.state)
+    assertEquals(Some(77L), outcome.reservationId)
+    assertEquals(Some("BOOKING_WARNINGS_REVIEW"), outcome.errorCode)
+    assertEquals(outcome, service.status(1L, req.attemptId.get).get)
+    assertTrue(service.accountBusy(1L))
+  }
+
   @Test def rejectionErrorAfterConfirmationStartsCannotReleaseAccountLock(): Unit = {
     val service = fixture()
     val api = mock(classOf[ApiService])
@@ -415,7 +430,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, monitorings, api)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
     when(api.reservationConfirm(anyLong(), any(), any(), any()))
@@ -587,7 +602,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, mock(classOf[MonitoringService]), api, smartEnrolled = false)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
     when(api.reservationConfirm(anyLong(), any(), any(), any())).thenReturn(Right(success))
@@ -623,7 +638,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, mock(classOf[MonitoringService]), api, smartEnrolled = false)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
     when(api.reservationConfirm(anyLong(), any(), any(), any())).thenThrow(new IllegalStateException("response lost"))
@@ -637,7 +652,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, mock(classOf[MonitoringService]), api, smartEnrolled = false)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
     when(api.reservationConfirm(anyLong(), any(), any(), any()))
@@ -653,7 +668,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, mock(classOf[MonitoringService]), api, smartEnrolled = false)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
     when(api.reservationConfirm(anyLong(), any(), any(), any()))
@@ -822,6 +837,16 @@ class BookingAttemptServiceSpec {
     assertTrue(BookingAttemptService.validateLockterm(withValuation.copy(value = withValuation.value.copy(valuations = List(valuation.copy(isReferralRequired = true)))), false).isLeft)
     assertTrue(BookingAttemptService.validateLockterm(withValuation, true).isLeft)
     assertTrue(BookingAttemptService.validateLockterm(withValuation.copy(value = withValuation.value.copy(changeTermAvailable = false)), false).isRight)
+    val safe = withValuation.copy(value = safeLockValue(valuation))
+    assertTrue(BookingAttemptService.validateLockterm(safe, false, Some(3L)).isRight)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(hasWarnings = true), false, Some(3L)).isLeft)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(warnings = List("bring referral")), false, Some(3L)).isLeft)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(value = safe.value.copy(conflictedVisit = Some("other visit"))), false, Some(3L)).isLeft)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(value = safe.value.copy(doctorDetails = selectedDoctor.copy(id = 99L))), false, Some(3L)).isLeft)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(value = safe.value.copy(askForReferral = Some(true))), false, Some(3L)).isLeft)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(value = safe.value.copy(askForReferral = None)), false, Some(3L)).isLeft)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(value = safe.value.copy(isBloodExamination = Some(true))), false, Some(3L)).isLeft)
+    assertTrue(BookingAttemptService.validateLockterm(safe.copy(value = safe.value.copy(isStomatology = Some(true))), false, Some(3L)).isLeft)
     val related = RelatedVisit(null, "Clinic", false, 77, LocalTime.NOON, LocalTime.NOON.plusMinutes(30))
     assertTrue(BookingAttemptService.validateLockterm(withValuation.copy(value = withValuation.value.copy(relatedVisits = List(related))), true).isRight)
     assertTrue(BookingAttemptService.validateLockterm(response.copy(hasErrors = true), true).isLeft)
@@ -830,6 +855,24 @@ class BookingAttemptServiceSpec {
     val outcome = service.execute(1, request())(() => Left(new BookingRejectedException("ALREADY_RESERVED")))
     assertEquals(Some("ALREADY_RESERVED"), outcome.errorCode)
     assertEquals("succeeded", service.execute(1, request())(() => Right(success)).state)
+  }
+
+  @Test def smartLocktermWarningStopsProviderConfirmation(): Unit = {
+    val service = fixture()
+    val api = mock(classOf[ApiService])
+    val monitorings = mock(classOf[MonitoringService])
+    when(monitorings.getActiveMonitorings(1L)).thenReturn(Seq.empty)
+    val controller = controllerWith(service, monitorings, api)
+    val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
+    val lock = ReservationLocktermResponse(Nil, List("bring referral"), false, true, safeLockValue(valuation))
+    when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
+    when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
+    val outcome = controller.submitBookingAttempt(1L, request().copy(isImpediment = Some(false)))
+      .getBody.asInstanceOf[ApiResponse[BookingOutcome]].data.get
+    assertEquals("failed", outcome.state)
+    assertEquals(Some("LOCKTERM_REQUIRES_REVIEW"), outcome.errorCode)
+    org.mockito.Mockito.verify(api, org.mockito.Mockito.never()).reservationConfirm(anyLong(), any(), any(), any())
+    assertFalse(service.accountBusy(1L))
   }
 
   @Test def v1LegacyAcknowledgementAcceptsOneSucceededBarrierWithOrWithoutAnOldLock(): Unit = {
@@ -876,7 +919,7 @@ class BookingAttemptServiceSpec {
     val controller = controllerWith(service, monitorings, api)
     val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
     val lock = ReservationLocktermResponse(Nil, Nil, false, false,
-      ReservationLocktermResponseValue(false, None, null, Nil, 123L, List(valuation)))
+      safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
     val start = ZonedDateTime.of(2026, 10, 6, 12, 0, 0, 0, ZoneId.of("Europe/Warsaw"))
