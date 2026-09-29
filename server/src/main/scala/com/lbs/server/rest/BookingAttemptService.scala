@@ -172,11 +172,16 @@ class BookingAttemptService(jdbc: JdbcTemplate, transactionManager: PlatformTran
         rs.getBoolean("telemedicine"), baseline.get.split(",").toList.filter(_.nonEmpty).map(_.toLong)))
     }, Long.box(accountId), id).asScala.headOption.flatten
 
-  private def fingerprintForExisting(accountId: Long, id: String, request: BookRequest): String =
-    if (reviewContext(accountId, id).isEmpty) BookingAttemptService.legacyFingerprint(request)
+  private def fingerprintForExisting(accountId: Long, id: String, request: BookRequest, stored: String): String = {
+    val current = BookingAttemptService.fingerprint(request.copy(attemptId = None).toString)
+    // A rejected ACCOUNT_BUSY attempt has no recovery context, but its row
+    // still carries the full v4 fingerprint. Preserve exact replay of it.
+    if (stored == current) current
+    else if (reviewContext(accountId, id).isEmpty) BookingAttemptService.legacyFingerprint(request)
     else if (jdbc.queryForObject("SELECT baseline_reservation_facts FROM booking_attempt WHERE account_id=? AND id=?",
         classOf[String], Long.box(accountId), id) == null) BookingAttemptService.v3Fingerprint(request)
-    else BookingAttemptService.fingerprint(request.copy(attemptId = None).toString)
+    else current
+  }
 
   def accountBusy(accountId: Long): Boolean =
     cancellationReceipts.hasPending(accountId) || unresolvedRows(accountId) ||
@@ -617,7 +622,7 @@ class BookingAttemptService(jdbc: JdbcTemplate, transactionManager: PlatformTran
     val existing = status(accountId, id)
     if (existing.nonEmpty) {
       val old = jdbc.queryForObject("SELECT fingerprint FROM booking_attempt WHERE account_id=? AND id=?", classOf[String], Long.box(accountId), id)
-      val fingerprint = fingerprintForExisting(accountId, id, request)
+      val fingerprint = fingerprintForExisting(accountId, id, request, old)
       require(old == fingerprint, "Booking attempt ID already has another payload")
       return existing.get
     }
@@ -648,7 +653,7 @@ class BookingAttemptService(jdbc: JdbcTemplate, transactionManager: PlatformTran
         val raced = status(accountId, id)
         if (raced.nonEmpty) {
           val old = jdbc.queryForObject("SELECT fingerprint FROM booking_attempt WHERE account_id=? AND id=?", classOf[String], Long.box(accountId), id)
-          require(old == fingerprintForExisting(accountId, id, request), "Booking attempt ID already has another payload")
+          require(old == fingerprintForExisting(accountId, id, request, old), "Booking attempt ID already has another payload")
           return raced.get
         }
         try transaction.executeWithoutResult { _ =>
@@ -657,7 +662,7 @@ class BookingAttemptService(jdbc: JdbcTemplate, transactionManager: PlatformTran
         } catch {
           case _: DuplicateKeyException =>
             val old = jdbc.queryForObject("SELECT fingerprint FROM booking_attempt WHERE account_id=? AND id=?", classOf[String], Long.box(accountId), id)
-            require(old == fingerprintForExisting(accountId, id, request), "Booking attempt ID already has another payload")
+            require(old == fingerprintForExisting(accountId, id, request, old), "Booking attempt ID already has another payload")
         }
         return status(accountId, id).getOrElse(BookingOutcome("unknown", errorCode = Some("VERIFY_RESERVATION")))
     }

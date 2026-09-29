@@ -122,6 +122,9 @@ class BookingAttemptServiceSpec {
     val denied = request()
     assertEquals("failed", service.execute(1, denied)(() => throw new AssertionError("account must be held")).state)
     assertEquals(Some("ACCOUNT_BUSY"), service.status(1, denied.attemptId.get).get.errorCode)
+    val replay = service.execute(1, denied)(() => throw new AssertionError("busy attempt must not be retried"))
+    assertEquals("failed", replay.state)
+    assertEquals(Some("ACCOUNT_BUSY"), replay.errorCode)
     assertTrue(service.accountBusy(1))
   }
 

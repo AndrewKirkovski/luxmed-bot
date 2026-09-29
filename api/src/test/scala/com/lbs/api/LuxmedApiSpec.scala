@@ -513,6 +513,17 @@ class LuxmedApiSpec extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     )
   }
 
+  test("deleteTemporaryReservation rejects an unrecognized 200 response body") {
+    for (body <- List("{\"HasErrors\":true,\"Errors\":[\"not released\"]}", "{\"released\":true}")) {
+      resetWireMock()
+      wireMock.stubFor(
+        post(urlPathEqualTo("/PatientPortal/NewPortal/reservation/releaseterm"))
+          .willReturn(aResponse().withStatus(200).withBody(body))
+      )
+      api.deleteTemporaryReservation(session, xsrfToken, 888L) shouldBe a[Left[?, ?]]
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // reservationConfirm
   // ═══════════════════════════════════════════════════════════════════════════

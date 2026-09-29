@@ -1,5 +1,6 @@
 package com.lbs.api
 
+import cats.MonadError
 import cats.implicits.toFunctorOps
 import com.lbs.api.http.*
 import com.lbs.api.http.headers.*
@@ -285,7 +286,14 @@ class LuxmedApi[F[_]: ThrowableMonad] extends ApiBase {
       case Some(body) => request.method(Method.POST, request.uri).body(body)
       case None       => request.method(Method.POST, request.uri)
     }
-    postRequest.invoke.void
+    val monad = MonadError[F, Throwable]
+    monad.flatMap(postRequest.invoke) { response =>
+      // The only observed releaseterm success is an empty 2xx response. Do
+      // not treat an unrecognized business response or redirect as release.
+      if (response.code >= 200 && response.code < 300 && Option(response.body).exists(_.trim.isEmpty))
+        monad.pure(())
+      else monad.raiseError(new IllegalStateException("Temporary reservation release was not confirmed"))
+    }
   }
 
   private def delete(request: Request[String, Any]): F[LuxmedResponse[String]] =
