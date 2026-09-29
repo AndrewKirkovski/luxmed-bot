@@ -5,6 +5,7 @@ import com.lbs.bot.model.MessageSource
 import com.lbs.server.conversation.Book.BookingData
 import com.lbs.server.repository.model.*
 import com.lbs.server.repository.{DataRepository, model}
+import com.lbs.server.rest.{BookingAttemptService, BookingRejectedException}
 import com.lbs.server.util.ServerModelConverters
 import com.lbs.server.util.ServerModelConverters.*
 import jakarta.transaction.Transactional
@@ -19,6 +20,8 @@ class DataService {
 
   @Autowired
   private[service] var dataRepository: DataRepository = uninitialized
+  @Autowired
+  private var bookingAttempts: BookingAttemptService = uninitialized
 
   def getLatestCities(accountId: Long): Seq[IdName] = {
     dataRepository.getCityHistory(accountId).mapTo[Seq[IdName]]
@@ -121,6 +124,11 @@ class DataService {
     val userMaybe = dataRepository.findUserIdBySource(source.chatId, source.sourceSystem.id).flatMap { userId =>
       dataRepository.findUser(userId).map(_ -> userId)
     }
+    val existingAccount = userMaybe.flatMap { case (_, userId) =>
+      findCredentialsByUsername(username, userId).map(_.accountId.longValue())
+    }
+    if (bookingAttempts.enrolledAccountForUsername(username).exists(id => !existingAccount.contains(id)))
+      throw new BookingRejectedException("SMART_BOOKING_IDENTITY_ENROLLED")
     userMaybe match {
       case Some((user, userId)) =>
         val credentialsMaybe = findCredentialsByUsername(username, userId)

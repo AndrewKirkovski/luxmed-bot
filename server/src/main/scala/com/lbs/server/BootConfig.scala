@@ -6,7 +6,7 @@ import com.lbs.bot.telegram.TelegramBot
 import com.lbs.server.conversation.*
 import com.lbs.server.lang.Localization
 import com.lbs.server.repository.model.Monitoring
-import com.lbs.server.service.{ApiService, DataService, MonitoringService}
+import com.lbs.server.service.{ApiService, BookingCancellationService, DataService, MonitoringService}
 import org.apache.pekko.actor.ActorSystem
 import org.jasypt.util.text.{StrongTextEncryptor, TextEncryptor}
 import org.springframework.beans.factory.annotation.{Autowired, Value}
@@ -31,6 +31,8 @@ class BootConfig {
 
   @Autowired
   private var monitoringService: MonitoringService = uninitialized
+  @Autowired
+  private var bookingCancellation: BookingCancellationService = uninitialized
 
   @Autowired
   private var localization: Localization = uninitialized
@@ -140,7 +142,7 @@ class BootConfig {
   @Bean
   @ConditionalOnProperty(name = Array("telegram.enabled"), havingValue = "true")
   def reservedVisitsFactory: UserIdTo[ReservedVisitsViewer] =
-    userId => new ReservedVisitsViewer(userId, bot, apiService, localization, reservedVisitsPagerFactory)(actorSystem)
+    userId => new ReservedVisitsViewer(userId, bot, apiService, bookingCancellation, localization, reservedVisitsPagerFactory)(actorSystem)
 
   @Bean
   @ConditionalOnProperty(name = Array("telegram.enabled"), havingValue = "true")

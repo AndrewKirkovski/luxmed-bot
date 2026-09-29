@@ -1,0 +1,34 @@
+databaseChangeLog:
+- changeSet:
+    id: 13-cancellation-review
+    author: ai-managers
+    runInTransaction: true
+    changes:
+    - sql:
+        sql: >-
+          ALTER TABLE cancellation_receipt ALTER COLUMN state TYPE VARCHAR(32);
+          ALTER TABLE cancellation_receipt ADD COLUMN reviewed_at BIGINT;
+          ALTER TABLE cancellation_receipt ADD COLUMN reviewed_by VARCHAR(128);
+          ALTER TABLE cancellation_receipt ADD COLUMN review_reason VARCHAR(1000);
+          ALTER TABLE cancellation_receipt ADD COLUMN review_action VARCHAR(32);
+          CREATE TABLE cancellation_receipt_review_audit (
+            audit_id BIGSERIAL PRIMARY KEY,
+            account_id BIGINT NOT NULL,
+            reservation_id BIGINT NOT NULL,
+            start_at BIGINT NOT NULL,
+            old_state VARCHAR(32) NOT NULL,
+            new_state VARCHAR(32) NOT NULL,
+            action VARCHAR(32) NOT NULL,
+            reviewed_by VARCHAR(128) NOT NULL,
+            reason VARCHAR(1000) NOT NULL,
+            reviewed_at BIGINT NOT NULL
+          );
+          INSERT INTO cancellation_receipt_review_audit
+            (account_id,reservation_id,start_at,old_state,new_state,action,reviewed_by,reason,reviewed_at)
+          SELECT account_id,reservation_id,start_at,'confirmed','pending',
+            'legacy_unverified','migration',
+            'Previous absent-feed confirmation requires operator review',
+            COALESCE(confirmed_at,requested_at)
+          FROM cancellation_receipt WHERE state='confirmed';
+          UPDATE cancellation_receipt SET state='pending',confirmed_at=NULL
+          WHERE state='confirmed';

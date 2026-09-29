@@ -1,5 +1,7 @@
 package com.lbs.server.rest
 
+import com.lbs.api.json.model.PreparationItem
+
 case class LoginRequest(username: String, password: String, chatId: String)
 
 case class SearchTermsRequest(
@@ -29,8 +31,12 @@ case class BookRequest(
   dateTimeTo: String,
   isTelemedicine: Boolean = false,
   isAdditional: Boolean = false,
+  isImpediment: Option[Boolean] = None,
+  impedimentText: Option[String] = None,
   isPreparationRequired: Boolean = false,
-  rebookIfExists: Boolean = false
+  preparationItems: List[PreparationItem] = List.empty,
+  rebookIfExists: Boolean = false,
+  attemptId: Option[String] = None
 )
 
 case class CreateMonitoringRequest(
@@ -62,3 +68,5 @@ object ApiResponse {
 }
 
 case class LoginResult(userId: Long, accountId: Long, username: String)
+
+case class BookingOutcome(state: String, reservationId: Option[Long] = None, errorCode: Option[String] = None)

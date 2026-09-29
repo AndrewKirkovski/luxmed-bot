@@ -8,13 +8,14 @@ import com.lbs.server.conversation.Pager.SimpleItemsProvider
 import com.lbs.server.conversation.ReservedVisitsViewer.Tags
 import com.lbs.server.conversation.base.Conversation
 import com.lbs.server.lang.{Localizable, Localization}
-import com.lbs.server.service.ApiService
+import com.lbs.server.service.{ApiService, BookingCancellationService}
 import org.apache.pekko.actor.ActorSystem
 
 class ReservedVisitsViewer(
   val userId: UserId,
   bot: Bot,
   apiService: ApiService,
+  bookingCancellation: BookingCancellationService,
   val localization: Localization,
   visitsPagerFactory: UserIdWithOriginatorTo[Pager[Event]]
 )(val actorSystem: ActorSystem)
@@ -57,7 +58,7 @@ class ReservedVisitsViewer(
         bot.sendMessage(userId.source, lang.appointmentWasNotCancelled)
         end()
       case Msg(Command(_, _, Some(Tags.Yes)), visit: Event) =>
-        apiService.deleteReservation(userId.accountId, visit.eventId) match {
+        bookingCancellation.cancel(userId.accountId, visit.eventId, Some(visit.date.toInstant.toEpochMilli)) match {
           case Left(ex) => bot.sendMessage(userId.source, lang.unableToCancelUpcomingVisit(ex.getMessage))
           case Right(_) => bot.sendMessage(userId.source, lang.appointmentHasBeenCancelled)
         }

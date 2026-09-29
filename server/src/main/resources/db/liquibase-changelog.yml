@@ -26,3 +26,18 @@ databaseChangeLog:
 - include:
       file: changelog/08-add-service-instance-id-to-monitoring.yml
       relativeToChangelogFile: true
+- include:
+      file: changelog/09-booking-attempts.yml
+      relativeToChangelogFile: true
+- include:
+      file: changelog/10-legacy-booking-barrier.yml
+      relativeToChangelogFile: true
+- include:
+      file: changelog/11-cancellation-receipts.yml
+      relativeToChangelogFile: true
+- include:
+      file: changelog/12-booking-phases.yml
+      relativeToChangelogFile: true
+- include:
+      file: changelog/13-cancellation-review.yml
+      relativeToChangelogFile: true

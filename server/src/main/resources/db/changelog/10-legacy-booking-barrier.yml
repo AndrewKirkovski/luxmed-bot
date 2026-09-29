@@ -1,0 +1,17 @@
+databaseChangeLog:
+- changeSet:
+    id: 10-legacy-booking-barrier
+    author: ai-managers
+    changes:
+    - sql:
+        sql: >-
+          CREATE TABLE legacy_booking_barrier (
+            id VARCHAR(36) PRIMARY KEY, account_id BIGINT NOT NULL,
+            state VARCHAR(20) NOT NULL, reservation_id BIGINT, monitoring_id BIGINT,
+            start_at BIGINT NOT NULL, created_at BIGINT NOT NULL
+          );
+          CREATE INDEX legacy_booking_barrier_account_idx ON legacy_booking_barrier(account_id);
+          CREATE TABLE smart_booking_enrollment (
+            account_id BIGINT PRIMARY KEY, identity_key VARCHAR(255) NOT NULL UNIQUE,
+            enrolled_at BIGINT NOT NULL
+          );

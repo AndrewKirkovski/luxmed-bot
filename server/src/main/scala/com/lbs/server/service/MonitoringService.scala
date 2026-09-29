@@ -25,6 +25,7 @@ import scala.compiletime.uninitialized
 import scala.concurrent.duration.*
 import scala.language.implicitConversions
 import scala.util.Random
+import scala.util.control.NonFatal
 
 @Service
 class MonitoringService extends StrictLogging {
@@ -39,6 +40,10 @@ class MonitoringService extends StrictLogging {
   private var objectMapper: JsonMapper = uninitialized
   @Autowired
   private var apiService: ApiService = uninitialized
+  @Autowired
+  private var bookingFence: AccountBookingFence = uninitialized
+  @Autowired
+  private var bookingAttempts: com.lbs.server.rest.BookingAttemptService = uninitialized
   @Autowired
   private var localization: Localization = uninitialized
 
@@ -113,7 +118,12 @@ class MonitoringService extends StrictLogging {
           logger.debug(s"Found ${terms.length} terms by monitoring [#${monitoring.recordId}]")
           if (monitoring.autobook) {
             val term = terms.head
-            bookAppointment(term, monitoring, monitoring.rebookIfExists)
+            bookingFence.withLock(monitoring.accountId) {
+              if (monitoring.active && dataService.findMonitoring(monitoring.accountId, monitoring.recordId).exists(_.active)
+                  && !bookingAttempts.accountBusy(monitoring.accountId)
+                  && bookingAttempts.canLegacyMonitorBook(monitoring.accountId, monitoring.recordId))
+                bookAppointment(term, monitoring, monitoring.rebookIfExists)
+            }
           } else {
             notifyUserAboutTerms(terms, monitoring)
           }
@@ -188,7 +198,14 @@ class MonitoringService extends StrictLogging {
   }
 
   private def bookAppointment(term: TermExt, monitoring: Monitoring, rebookIfExists: Boolean): Unit = {
-    val bookingResult = for {
+    // Persist this barrier before any upstream call. A lost response or process
+    // crash must hold smart booking until the outcome has been verified.
+    val barrierId = bookingAttempts.beginLegacyBooking(monitoring.accountId,
+      term.term.dateTimeFrom.get.atZone(Zone).toInstant.toEpochMilli,
+      Option(monitoring.recordId).map(_.longValue()))
+    var confirmationStarted = false
+    val bookingResult = try {
+      for {
       xsrfToken <- apiService.getXsrfToken(monitoring.accountId)
       locktermRequest =
         if (monitoring.isRehab)
@@ -200,8 +217,21 @@ class MonitoringService extends StrictLogging {
         xsrfToken,
         locktermRequest
       )
+      _ <- if (reservationLocktermResponse.hasErrors || reservationLocktermResponse.value == null
+          || reservationLocktermResponse.value.temporaryReservationId <= 0) {
+        Option(reservationLocktermResponse.value).filter(_.temporaryReservationId > 0).foreach(value =>
+          apiService.deleteTemporaryReservation(monitoring.accountId, xsrfToken, value.temporaryReservationId)
+        )
+        Left(new IllegalStateException("Incomplete legacy lockterm response"))
+      } else Right(())
       temporaryReservationId = reservationLocktermResponse.value.temporaryReservationId
-      response <-
+      _ <- bookingAttempts.markLegacyConfirmationStarted(monitoring.accountId, barrierId).left.map { error =>
+        try apiService.deleteTemporaryReservation(monitoring.accountId, xsrfToken, temporaryReservationId)
+        catch { case scala.util.control.NonFatal(_) => () }
+        error
+      }
+      response <- {
+        confirmationStarted = true
         if (reservationLocktermResponse.value.changeTermAvailable && rebookIfExists) {
           logger.info(s"Service [${monitoring.serviceName}] is already booked. Trying to update term")
           bookOrUnlockTerm(
@@ -226,11 +256,19 @@ class MonitoringService extends StrictLogging {
             )
           )
         }
-    } yield response
+      }
+      } yield response
+    } catch { case NonFatal(error) => Left(error) }
     bookingResult match {
-      case Right(_) =>
-        sendNotification(monitoring.source, lang(monitoring.userId).appointmentIsBooked(term, monitoring))
+      case Right(response) if !response.hasErrors && response.value != null && response.value.reservationId > 0 =>
+        bookingAttempts.completeLegacyBooking(monitoring.accountId, barrierId, response.value.reservationId)
         deactivateMonitoring(monitoring.accountId, monitoring.recordId)
+        sendNotification(monitoring.source, lang(monitoring.userId).appointmentIsBooked(term, monitoring))
+      case Right(_) =>
+        logger.error(s"Legacy booking response for monitoring [${monitoring.recordId}] needs verification")
+      case Left(ex) if !confirmationStarted =>
+        bookingAttempts.clearLegacyBeforeSubmission(monitoring.accountId, barrierId)
+        logger.error(s"Unable to book appointment by monitoring [${monitoring.recordId}]", ex)
       case Left(ex) =>
         logger.error(s"Unable to book appointment by monitoring [${monitoring.recordId}]", ex)
     }
@@ -251,15 +289,18 @@ class MonitoringService extends StrictLogging {
   }
 
   def deactivateMonitoring(accountId: JLong, monitoringId: JLong): Unit = {
-    val activeMonitoringMaybe = activeMonitorings.remove(monitoringId)
-    activeMonitoringMaybe match {
-      case Some((monitoring, future)) =>
+    bookingFence.withLock(accountId) {
+    activeMonitorings.get(monitoringId) match {
+      case Some((monitoring, future)) if monitoring.accountId == accountId =>
+        activeMonitorings.remove(monitoringId)
         logger.debug(s"Deactivating scheduled monitoring [#$monitoringId]")
         if (!future.isCancelled) {
           future.cancel(true)
         }
         monitoring.active = false
         dataService.saveMonitoring(monitoring)
+      case Some(_) =>
+        logger.warn(s"Monitoring [#$monitoringId] does not belong to account [#$accountId]")
       case None =>
         logger.debug(s"Deactivating unscheduled monitoring [#$monitoringId]")
         dataService.findMonitoring(accountId, monitoringId).foreach { monitoring =>
@@ -267,12 +308,17 @@ class MonitoringService extends StrictLogging {
           dataService.saveMonitoring(monitoring)
         }
     }
+    }
   }
 
   def createMonitoring(monitoring: Monitoring): Monitoring = {
-    val userMonitoringsCount = dataService.getActiveMonitoringsCount(monitoring.accountId)
-    require(userMonitoringsCount + 1 <= 10, lang(monitoring.userId).maximumMonitoringsLimitExceeded)
-    dataService.saveMonitoring(monitoring)
+    bookingFence.withLock(monitoring.accountId) {
+      if (monitoring.autobook && bookingAttempts.identityHasSmartEnrollment(monitoring.accountId))
+        throw new com.lbs.server.rest.BookingRejectedException("SMART_BOOKING_ENROLLED")
+      val userMonitoringsCount = dataService.getActiveMonitoringsCount(monitoring.accountId)
+      require(userMonitoringsCount + 1 <= 10, lang(monitoring.userId).maximumMonitoringsLimitExceeded)
+      dataService.saveMonitoring(monitoring)
+    }
   }
 
   def getActiveMonitorings(accountId: Long): Seq[Monitoring] = {
@@ -309,7 +355,13 @@ class MonitoringService extends StrictLogging {
             )
             termMaybe match {
               case Some(term) =>
-                bookAppointment(term, monitoring, rebookIfExists = true)
+                bookingFence.withLock(accountId) {
+                  if (!bookingAttempts.accountBusy(accountId)
+                      && bookingAttempts.canLegacyMonitorBook(accountId, monitoringId) && monitoring.active
+                      && dataService.findMonitoring(accountId, monitoringId).exists(_.active))
+                    bookAppointment(term, monitoring, rebookIfExists = true)
+                  else logger.warn(s"Manual booking from monitoring [#$monitoringId] held by an account booking or inactive monitor")
+                }
               case None =>
                 sendNotification(monitoring.source, lang(monitoring.userId).termIsOutdated)
             }

@@ -224,6 +224,7 @@ class LuxmedApiSpec extends AnyFunSuite with Matchers with BeforeAndAfterAll {
     val result = api.events(session, fromDate = from, toDate = to)
     result shouldBe a[Right[?, ?]]
     result.toOption.get.events shouldBe empty
+    result.toOption.get.isEndOfList shouldBe Some(true)
 
     wireMock.verify(
       getRequestedFor(urlPathEqualTo("/PatientPortalMobileAPI/api/Events"))

@@ -99,7 +99,7 @@ import java.time.ZonedDateTime
   *   "ServerDateTime": "2021-07-01T14:32:00+02:00"
   * }
   */
-case class EventsResponse(events: List[Event]) extends SerializableJsonObject
+case class EventsResponse(events: List[Event], isEndOfList: Option[Boolean] = None) extends SerializableJsonObject
 
 case class Event(
   date: ZonedDateTime,
@@ -107,9 +107,11 @@ case class Event(
   doctor: Option[EventDoctor],
   eventId: Long,
   status: String,
-  title: String
+  title: String,
+  dateTo: Option[ZonedDateTime] = None,
+  eventType: Option[String] = None
 )
 
-case class EventClinic(address: String, city: String)
+case class EventClinic(address: String, city: String, id: Option[Long] = None, name: Option[String] = None)
 
 case class EventDoctor(lastname: String, name: String)

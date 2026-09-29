@@ -1,0 +1,11 @@
+databaseChangeLog:
+- changeSet:
+    id: 12-booking-phases
+    author: ai-managers
+    changes:
+    - sql:
+        sql: >-
+          ALTER TABLE booking_attempt ADD COLUMN phase VARCHAR(24);
+          ALTER TABLE booking_attempt ADD COLUMN process_id VARCHAR(36);
+          ALTER TABLE legacy_booking_barrier ADD COLUMN phase VARCHAR(24);
+          ALTER TABLE legacy_booking_barrier ADD COLUMN process_id VARCHAR(36);

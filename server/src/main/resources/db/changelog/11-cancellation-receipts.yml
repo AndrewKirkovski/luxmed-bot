@@ -1,0 +1,14 @@
+databaseChangeLog:
+- changeSet:
+    id: 11-cancellation-receipts
+    author: ai-managers
+    changes:
+    - sql:
+        sql: >-
+          CREATE TABLE cancellation_receipt (
+            account_id BIGINT NOT NULL, reservation_id BIGINT NOT NULL,
+            start_at BIGINT NOT NULL,
+            state VARCHAR(20) NOT NULL, requested_at BIGINT NOT NULL,
+            confirmed_at BIGINT,
+            PRIMARY KEY (account_id, reservation_id)
+          );

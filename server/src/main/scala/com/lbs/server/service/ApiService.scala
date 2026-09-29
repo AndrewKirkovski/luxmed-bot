@@ -5,13 +5,14 @@ import com.lbs.api.LuxmedApi
 import com.lbs.api.http.{LuxmedResponse, Session}
 import com.lbs.api.json.model.*
 import com.lbs.server.ThrowableOr
+import com.lbs.server.rest.BookingRejectedException
 import com.lbs.server.util.DateTimeUtil
 import org.jasypt.util.text.TextEncryptor
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.stereotype.Service
 
 import java.net.HttpCookie
-import java.time.{LocalDateTime, LocalTime}
+import java.time.{LocalDateTime, LocalTime, ZonedDateTime}
 import scala.compiletime.uninitialized
 
 @Service
@@ -21,6 +22,10 @@ class ApiService extends SessionSupport {
   protected var dataService: DataService = uninitialized
   @Autowired
   private var textEncryptor: TextEncryptor = uninitialized
+  @Autowired
+  private var cancellationReceipts: CancellationReceiptService = uninitialized
+  @Autowired
+  private var bookingFence: AccountBookingFence = uninitialized
 
   private val luxmedApi = new LuxmedApi[ThrowableOr]
 
@@ -177,19 +182,23 @@ class ApiService extends SessionSupport {
     accountId: Long,
     xsrfToken: XsrfToken,
     reservationConfirmRequest: ReservationConfirmRequest
-  ): ThrowableOr[ReservationConfirmResponse] =
-    withSession(accountId) { session =>
+  ): ThrowableOr[ReservationConfirmResponse] = bookingFence.withLock(accountId) {
+    if (cancellationReceipts.hasPending(accountId)) Left(new BookingRejectedException("CANCELLATION_UNRESOLVED"))
+    else withSession(accountId) { session =>
       luxmedApi.reservationConfirm(session, xsrfToken, reservationConfirmRequest)
     }
+  }
 
   def reservationChangeTerm(
     accountId: Long,
     xsrfToken: XsrfToken,
     reservationChangetermRequest: ReservationChangetermRequest
-  ): ThrowableOr[ReservationConfirmResponse] =
-    withSession(accountId) { session =>
+  ): ThrowableOr[ReservationConfirmResponse] = bookingFence.withLock(accountId) {
+    if (cancellationReceipts.hasPending(accountId)) Left(new BookingRejectedException("CANCELLATION_UNRESOLVED"))
+    else withSession(accountId) { session =>
       luxmedApi.reservationChangeTerm(session, xsrfToken, reservationChangetermRequest)
     }
+  }
 
   def history(
     accountId: Long,
@@ -211,6 +220,15 @@ class ApiService extends SessionSupport {
       luxmedApi
         .events(session, fromDate.atZone(DateTimeUtil.Zone), toDate.atZone(DateTimeUtil.Zone))
         .map(_.events.filter(_.status == "Reserved").sortBy(_.date))
+    }
+
+  def reservedVerified(accountId: Long, fromDate: ZonedDateTime, toDate: ZonedDateTime): ThrowableOr[List[Event]] =
+    withSession(accountId) { session =>
+      if (!fromDate.isBefore(toDate)) Left(new IllegalArgumentException("Invalid reservation coverage"))
+      else luxmedApi.events(session, fromDate, toDate).flatMap { response =>
+        if (response.isEndOfList.contains(true)) Right(response.events.filter(_.status == "Reserved").sortBy(_.date))
+        else Left(new IllegalStateException("LuxMed reservation response did not confirm a complete result"))
+      }
     }
 
   def deleteReservation(accountId: Long, reservationId: Long): ThrowableOr[LuxmedResponse[String]] =

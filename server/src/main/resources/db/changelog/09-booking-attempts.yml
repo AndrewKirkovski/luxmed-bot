@@ -1,0 +1,15 @@
+databaseChangeLog:
+- changeSet:
+    id: 09-booking-attempts
+    author: ai-managers
+    changes:
+    - sql:
+        sql: >-
+          CREATE TABLE booking_attempt (
+            id VARCHAR(36) PRIMARY KEY, account_id BIGINT NOT NULL,
+            fingerprint VARCHAR(64) NOT NULL, state VARCHAR(20) NOT NULL,
+            reservation_id BIGINT, error_code VARCHAR(64), created_at BIGINT NOT NULL
+          );
+          CREATE TABLE booking_account_lock (
+            account_id BIGINT PRIMARY KEY, attempt_id VARCHAR(36) NOT NULL
+          );
