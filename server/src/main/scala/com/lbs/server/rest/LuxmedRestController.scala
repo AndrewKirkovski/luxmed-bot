@@ -324,17 +324,12 @@ class LuxmedRestController extends StrictLogging {
       locktermResponse <- apiService.reservationLockterm(accountId, xsrfToken, termExt.mapTo[ReservationLocktermRequest])
       _ <- BookingAttemptService.validateLockterm(locktermResponse, request.rebookIfExists,
         request.attemptId.map(_ => request.doctorId)).left.map { error =>
-        Option(locktermResponse.value).filter(_.temporaryReservationId > 0).foreach(value =>
-          apiService.deleteTemporaryReservation(accountId, xsrfToken, value.temporaryReservationId)
-        )
-        error
+        Option(locktermResponse.value).filter(_.temporaryReservationId > 0)
+          .map(value => cleanupBeforeConfirmation(accountId, xsrfToken, value.temporaryReservationId, error))
+          .getOrElse(error)
       }
       temporaryReservationId = locktermResponse.value.temporaryReservationId
-      _ <- onConfirmationStarted().left.map { error =>
-        try apiService.deleteTemporaryReservation(accountId, xsrfToken, temporaryReservationId)
-        catch { case NonFatal(_) => () }
-        error
-      }
+      _ <- startConfirmationOrCleanup(accountId, xsrfToken, temporaryReservationId, onConfirmationStarted)
       response <- {
         confirmationStarted = true
         if (locktermResponse.value.changeTermAvailable && request.rebookIfExists) {
@@ -360,6 +355,23 @@ class LuxmedRestController extends StrictLogging {
       else if (request.attemptId.isEmpty || ex.isInstanceOf[BookingRejectedException]) ex
       else new BookingNotSubmittedException(ex)
     )
+  }
+
+  private def cleanupBeforeConfirmation(accountId: Long, xsrfToken: XsrfToken,
+                                        temporaryReservationId: Long, originalError: Throwable): Throwable = {
+    try apiService.deleteTemporaryReservation(accountId, xsrfToken, temporaryReservationId) match {
+      case Right(_) => originalError
+      case Left(_) => new BookingRejectedException("TEMPORARY_RESERVATION_CLEANUP_UNCERTAIN")
+    }
+    catch { case NonFatal(_) => new BookingRejectedException("TEMPORARY_RESERVATION_CLEANUP_UNCERTAIN") }
+  }
+
+  private def startConfirmationOrCleanup(accountId: Long, xsrfToken: XsrfToken,
+                                         temporaryReservationId: Long,
+                                         onConfirmationStarted: () => Either[Throwable, Unit]): Either[Throwable, Unit] = {
+    val started = try onConfirmationStarted()
+    catch { case NonFatal(error) => Left(error) }
+    started.left.map(error => cleanupBeforeConfirmation(accountId, xsrfToken, temporaryReservationId, error))
   }
 
   private def bookOrUnlockTerm[T](

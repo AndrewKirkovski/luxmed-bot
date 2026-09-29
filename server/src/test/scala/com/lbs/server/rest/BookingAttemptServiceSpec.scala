@@ -892,12 +892,62 @@ class BookingAttemptServiceSpec {
     val lock = ReservationLocktermResponse(Nil, List("bring referral"), false, true, safeLockValue(valuation))
     when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
     when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
+    when(api.deleteTemporaryReservation(anyLong(), any(), anyLong())).thenReturn(Right(()))
     val outcome = controller.submitBookingAttempt(1L, request().copy(isImpediment = Some(false)))
       .getBody.asInstanceOf[ApiResponse[BookingOutcome]].data.get
     assertEquals("failed", outcome.state)
     assertEquals(Some("LOCKTERM_REQUIRES_REVIEW"), outcome.errorCode)
     org.mockito.Mockito.verify(api, org.mockito.Mockito.never()).reservationConfirm(anyLong(), any(), any(), any())
     assertFalse(service.accountBusy(1L))
+  }
+
+  @Test def failedLocktermCleanupReturnsDistinctDefiniteError(): Unit = {
+    for (cleanupThrows <- List(false, true)) {
+      val service = fixture()
+      val api = mock(classOf[ApiService])
+      val monitorings = mock(classOf[MonitoringService])
+      when(monitorings.getActiveMonitorings(1L)).thenReturn(Seq.empty)
+      val controller = controllerWith(service, monitorings, api)
+      val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
+      val lock = ReservationLocktermResponse(Nil, List("bring referral"), false, true, safeLockValue(valuation))
+      when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
+      when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
+      if (cleanupThrows)
+        when(api.deleteTemporaryReservation(anyLong(), any(), anyLong())).thenThrow(new RuntimeException("cleanup failed"))
+      else
+        when(api.deleteTemporaryReservation(anyLong(), any(), anyLong())).thenReturn(Left(new RuntimeException("cleanup failed")))
+      val outcome = controller.submitBookingAttempt(1L, request().copy(isImpediment = Some(false)))
+        .getBody.asInstanceOf[ApiResponse[BookingOutcome]].data.get
+      assertEquals("failed", outcome.state)
+      assertEquals(Some("TEMPORARY_RESERVATION_CLEANUP_UNCERTAIN"), outcome.errorCode)
+      org.mockito.Mockito.verify(api, org.mockito.Mockito.never()).reservationConfirm(anyLong(), any(), any(), any())
+      assertFalse(service.accountBusy(1L))
+    }
+  }
+
+  @Test def failedCleanupAfterConfirmationGateReturnsDistinctDefiniteError(): Unit = {
+    for (cleanupThrows <- List(false, true)) {
+      val service = fixture()
+      val api = mock(classOf[ApiService])
+      val monitorings = mock(classOf[MonitoringService])
+      when(monitorings.getActiveMonitorings(1L)).thenReturn(Seq.empty)
+      val controller = controllerWith(service, monitorings, api)
+      val valuation = Valuation(None, None, false, false, None, Some(0.0), None, None, None, false, 1)
+      val lock = ReservationLocktermResponse(Nil, Nil, false, false, safeLockValue(valuation))
+      when(api.getXsrfToken(anyLong())).thenReturn(Right(XsrfToken("tok", Seq.empty)))
+      when(api.reservationLockterm(anyLong(), any(), any())).thenReturn(Right(lock))
+      when(api.reservedVerified(anyLong(), any(), any())).thenReturn(Left(new RuntimeException("feed unavailable")))
+      if (cleanupThrows)
+        when(api.deleteTemporaryReservation(anyLong(), any(), anyLong())).thenThrow(new RuntimeException("cleanup failed"))
+      else
+        when(api.deleteTemporaryReservation(anyLong(), any(), anyLong())).thenReturn(Left(new RuntimeException("cleanup failed")))
+      val outcome = controller.submitBookingAttempt(1L, request().copy(isImpediment = Some(false)))
+        .getBody.asInstanceOf[ApiResponse[BookingOutcome]].data.get
+      assertEquals("failed", outcome.state)
+      assertEquals(Some("TEMPORARY_RESERVATION_CLEANUP_UNCERTAIN"), outcome.errorCode)
+      org.mockito.Mockito.verify(api, org.mockito.Mockito.never()).reservationConfirm(anyLong(), any(), any(), any())
+      assertFalse(service.accountBusy(1L))
+    }
   }
 
   @Test def v1LegacyAcknowledgementAcceptsOneSucceededBarrierWithOrWithoutAnOldLock(): Unit = {
@@ -953,6 +1003,7 @@ class BookingAttemptServiceSpec {
     val moved = Event(start.minusHours(1), Some(EventClinic("Street", "Warsaw", Some(2L))), None,
       42L, "Reserved", "Visit", Some(start.minusMinutes(30)), Some("Visit"))
     when(api.reservedVerified(anyLong(), any(), any())).thenReturn(Right(List(moved)))
+    when(api.deleteTemporaryReservation(anyLong(), any(), anyLong())).thenReturn(Right(()))
     val req = request().copy(isImpediment = Some(false), baselineReservationIds = Some(List(42L)),
       baselineReservations = Some(List(baseline)))
     val outcome = controller.submitBookingAttempt(1L, req)
